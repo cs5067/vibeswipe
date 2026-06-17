@@ -35,8 +35,16 @@ yarn-error.log*
 .env.*
 !.env.example
 
-# local agent/editor config & generated planning artifacts
-.claude/settings.local.json
+# local agent/editor config — kept out of the public repo
+.claude/
+.mcp.json
+
+# internal planning / strategy / agent docs — kept local, not published
+AGENTS.md
+CLAUDE.md
+HANDOFF.md
+PLAN.md
+docs/
 council-report-*.html
 council-transcript-*.md
 
