@@ -95,7 +95,7 @@ live only in `.env.local` (gitignored); nothing sensitive is committed.
 
 ## Production readiness
 
-This is a working prototype, honestly labelled. Before any public deployment:
+This is a working prototype. Before any public deployment:
 the session cookie needs signing, several API routes need auth + rate limiting,
 and Spotify dev-mode limits apply. Database access is already locked down with
 Supabase RLS (every table; reachable only via the server-side service role).
