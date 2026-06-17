@@ -1,36 +1,82 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# vibeswipe
 
-## Getting Started
+A social music app. You swipe through songs, build a vibe, and **force the ones
+you love onto your friends** — they get it in their inbox, and you find out when
+they actually listen. Music taste as a way to connect, not just discover.
 
-First, run the development server:
+> ⚠️ Early-stage / not production-hardened. See [docs/SECURITY.md](docs/SECURITY.md)
+> before deploying anywhere public.
+
+## Surfaces
+
+- `mobile/` — Expo / React Native app. **The primary surface.**
+- `src/` — Next.js web app + the server (API routes, corpus, social backend).
+- `supabase/migrations/` — database schema (corpus + social).
+
+The mobile app talks to Spotify directly and to the Next.js server for the
+corpus, recommendations, and (soon) social features.
+
+## How recommendations work
+
+The goal — the "Abid & John" idea: *if a stranger's playlist already contains
+the songs you're liking, the rest of that playlist is a strong recommendation.*
+Spotify's API can't answer "which playlists contain this song," so the engine
+blends three sources, self-balancing as the first one grows:
+
+1. **Our own playlist corpus** (primary). A Postgres index of which songs appear
+   on which playlists. `cooccur_recommend()` answers the John/Michael question
+   directly. The corpus fills passively — every playlist any session scans is
+   ingested — plus a seeder (`/api/corpus/seed`) that mines a deliberately
+   diverse keyword bank.
+2. **Last.fm similar tracks** (borrowed scale). "People who play X also play Y,"
+   computed from millions of real listeners — carries quality while the corpus
+   densifies.
+3. **Spotify search strategies** (filler + corpus feeders).
+
+Audio previews fall back to Deezer's public API (Spotify removed `preview_url`
+from most responses).
+
+## Local development
+
+Copy the env template and fill in your keys:
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+cp .env.example .env.local   # then fill in Spotify + Supabase (+ optional Last.fm)
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Web:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+npm install
+npm run dev            # http://localhost:3000 — connect Spotify here
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Apply the database schema to your Supabase project from
+`supabase/migrations/` (via the Supabase SQL editor or CLI).
 
-## Learn More
+Mobile (Expo Go):
 
-To learn more about Next.js, take a look at the following resources:
+```bash
+cd mobile
+npm install
+npx expo start --port 8082
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+The mobile app's server URL and Spotify redirect URI default to a LAN IP for
+local dev — see `mobile/src/lib/server-api.ts` and
+`mobile/src/lib/spotify/auth.ts`. Register the redirect URI in your Spotify
+dashboard.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Required environment
 
-## Deploy on Vercel
+See [.env.example](.env.example). Secrets live only in `.env.local`
+(gitignored). Never hardcode keys; never prefix a secret with `NEXT_PUBLIC_`.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Checks
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```bash
+npx tsc --noEmit            # web
+cd mobile && npm run typecheck
+npm run lint
+npm audit --audit-level=moderate
+```

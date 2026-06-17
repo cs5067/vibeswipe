@@ -30,8 +30,15 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
-.env*
+# env files — NEVER commit real secrets. (.env.example is the committed template.)
+.env
+.env.*
+!.env.example
+
+# local agent/editor config & generated planning artifacts
+.claude/settings.local.json
+council-report-*.html
+council-transcript-*.md
 
 # vercel
 .vercel
