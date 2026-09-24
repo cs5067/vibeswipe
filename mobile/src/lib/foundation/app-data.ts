@@ -4,7 +4,7 @@ export interface StoredSwipe {
   userId: string;
   sessionId: string;
   trackId: string;
-  direction: "left" | "right" | "up";
+  direction: "left" | "right" | "up" | "down";
   strategy: string;
   createdAt: string;
 }

@@ -11,8 +11,17 @@ import {
 } from "react-native";
 import { SwipeCard } from "../components/SwipeCard";
 import { ActionButtons } from "../components/ActionButtons";
+import { SendSongSheet } from "../components/SendSongSheet";
 import { useSessionStore } from "../stores/session-store";
-import { RecommendationEngine } from "../lib/engine/recommendation-engine";
+import { DEEZER_TEST_MODE } from "../lib/discovery-mode";
+import {
+  getEngineSession,
+  markEngineInitialized,
+  resetEngineSession,
+  type SessionEngine,
+} from "../lib/engine/engine-session";
+import * as SpotifyAPI from "../lib/spotify/client";
+import { fetchInbox } from "../lib/server-api";
 import { playbackController } from "../lib/playback-controller";
 import { analytics } from "../lib/foundation/analytics";
 import { appDataStore } from "../lib/foundation/app-data";
@@ -23,32 +32,54 @@ const { width: SCREEN_WIDTH } = Dimensions.get("window");
 interface SwipeScreenProps {
   onOpenPlaylist: () => void;
   onEndSession: () => void;
+  onOpenInbox: () => void;
+  onOpenFriends: () => void;
 }
 
-export function SwipeScreen({ onOpenPlaylist, onEndSession }: SwipeScreenProps) {
-  const engineRef = useRef<RecommendationEngine | null>(null);
+export function SwipeScreen({
+  onOpenPlaylist,
+  onEndSession,
+  onOpenInbox,
+  onOpenFriends,
+}: SwipeScreenProps) {
+  const engineRef = useRef<SessionEngine | null>(null);
   const [visibleTracks, setVisibleTracks] = useState<AppTrack[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [swipeKey, setSwipeKey] = useState(0);
   const [spotifyConnected, setSpotifyConnected] = useState<boolean | null>(null);
   const [isPlayingTrack, setIsPlayingTrack] = useState(false);
-  const [debugMode, setDebugMode] = useState(false);
+  const [debugMode, setDebugMode] = useState(DEEZER_TEST_MODE);
+  const [playbackError, setPlaybackError] = useState<string | null>(null);
   const [recommendationStatus, setRecommendationStatus] = useState("Building your vibe profile");
+  const [sendSheetTrack, setSendSheetTrack] = useState<AppTrack | null>(null);
+  const [unseenCount, setUnseenCount] = useState(0);
   const likedSyncVersionRef = useRef(0);
+  const mountedRef = useRef(true);
 
   const {
-    addLikedTrack, addSkippedTrack, addSavedForLater,
+    addLikedTrack, addSkippedTrack, addSavedForLater, addSavedToLiked,
     likedTracks, savedForLater, swipeCount,
-    playlistName, selectedVibes, saveCurrentPlaylist,
+    playlistName, selectedVibes, saveCurrentPlaylist, sessionStartTime,
   } = useSessionStore();
   const likedTrackKey = likedTracks.map((track) => track.id).join("|");
   const previousLikedTrackKeyRef = useRef(likedTrackKey);
 
+  // The engine outlives this screen (App.tsx unmounts it when the user
+  // views their playlist). Mirror visibleTracks in a ref so the unmount
+  // cleanup can hand the on-screen cards back to the persistent queue.
+  const visibleTracksRef = useRef<AppTrack[]>([]);
+  useEffect(() => {
+    visibleTracksRef.current = visibleTracks;
+  }, [visibleTracks]);
+
   // Try to connect to Spotify playback on mount
   useEffect(() => {
+    if (DEEZER_TEST_MODE) return () => { void playbackController.pause(); };
+    let active = true;
     (async () => {
       const found = await playbackController.findDevice();
+      if (!active) return;
       setSpotifyConnected(found);
       if (!found) {
         Alert.alert(
@@ -63,23 +94,53 @@ export function SwipeScreen({ onOpenPlaylist, onEndSession }: SwipeScreenProps) 
     })();
 
     return () => {
-      playbackController.pause();
+      active = false;
+      void playbackController.pause();
     };
   }, []);
 
-  // Play the current top track whenever it changes
+  // Inbox badge: check for unheard forced songs every 30s while this
+  // screen is on. Silent-fail like all server calls.
   useEffect(() => {
-    if (visibleTracks.length > 0 && spotifyConnected && playbackController.connected) {
+    if (DEEZER_TEST_MODE) return;
+    let alive = true;
+    const check = async () => {
+      const data = await fetchInbox();
+      if (alive && data) setUnseenCount(data.unseen || 0);
+    };
+    void check();
+    const interval = setInterval(() => void check(), 30000);
+    return () => {
+      alive = false;
+      clearInterval(interval);
+    };
+  }, []);
+
+  // The controller rejects stale audio; this effect also rejects stale UI updates.
+  useEffect(() => {
+    let active = true;
+    if (visibleTracks.length > 0) {
       const topTrack = visibleTracks[0];
       (async () => {
         setIsPlayingTrack(true);
-        const success = await playbackController.play(topTrack.uri);
+        setPlaybackError(null);
+        const success = await playbackController.play(topTrack.uri, {
+          name: topTrack.name,
+          artist: topTrack.artistNames[0] || "",
+          provider: topTrack.provider,
+          previewUrl: topTrack.previewUrl,
+        });
+        if (!active) return;
         if (!success) {
-          setSpotifyConnected(playbackController.connected);
+          if (DEEZER_TEST_MODE) setPlaybackError("Preview unavailable. Try another track.");
+          else setSpotifyConnected(playbackController.connected);
         }
         setIsPlayingTrack(false);
       })();
+    } else {
+      void playbackController.pause();
     }
+    return () => { active = false; };
   }, [visibleTracks[0]?.id, swipeKey]);
 
   // Auto-save every 10 swipes
@@ -90,33 +151,73 @@ export function SwipeScreen({ onOpenPlaylist, onEndSession }: SwipeScreenProps) 
   }, [swipeCount]);
 
   useEffect(() => {
-    const engine = new RecommendationEngine();
+    mountedRef.current = true;
+    let active = true;
+    const sessionKey = `${playlistName}::${sessionStartTime}`;
+    const { engine, needsInit } = getEngineSession(sessionKey);
     engineRef.current = engine;
+    const saved = useSessionStore.getState();
+    engine.restoreSeen?.([...saved.skippedTrackIds, ...saved.savedTrackIds, ...saved.savedForLater.map((t) => t.id)]);
+    const statusTimer = setInterval(() => {
+      if (active) setRecommendationStatus(engine.getStatusMessage());
+    }, 400);
 
-    analytics.track("session_started", {
-      playlistName,
-      selectedVibes: selectedVibes.join(","),
-    });
-
-    engine
-      .initialize(playlistName, selectedVibes, likedTracks)
-      .then(async () => {
-        engine.syncLikedTracks(likedTracks);
-        setRecommendationStatus(engine.getStatusMessage());
-        const tracks: AppTrack[] = [];
-        for (let i = 0; i < 5; i++) {
-          const track = await engine.getNextTrack();
-          if (track) tracks.push(track);
+    const dealCards = async () => {
+      const tracks: AppTrack[] = [];
+      const version = likedSyncVersionRef.current;
+      for (let i = 0; i < 5; i++) {
+        const track = await engine.getNextTrack();
+        if (!track) break;
+        tracks.push(track);
+        if (!active || version !== likedSyncVersionRef.current) {
+          if (!active) engine.requeue(tracks);
+          return;
         }
-        setVisibleTracks(tracks);
-        setRecommendationStatus(engine.getStatusMessage());
-        setIsLoading(false);
-      })
-      .catch((err) => {
-        console.error("Engine init error:", err);
-        setError("Failed to load your music data. Please restart the app.");
-        setIsLoading(false);
+      }
+      if (!active) return;
+      setVisibleTracks(tracks);
+      setRecommendationStatus(engine.getStatusMessage());
+      setIsLoading(false);
+    };
+
+    if (!needsInit) {
+      // RESUME: same session, engine still warm — deal from the live queue,
+      // no re-initialization, no cold start.
+      console.log("Engine resume: continuing existing session");
+      engine.syncLikedTracks(likedTracks);
+      dealCards();
+    } else {
+      analytics.track("session_started", {
+        playlistName,
+        selectedVibes: selectedVibes.join(","),
       });
+
+      engine
+        .initialize(playlistName, selectedVibes, likedTracks)
+        .then(async () => {
+          markEngineInitialized(sessionKey);
+          if (!active) return;
+          engine.syncLikedTracks(likedTracks);
+          setRecommendationStatus(engine.getStatusMessage());
+          await dealCards();
+        })
+        .catch((err) => {
+          if (!active) return;
+          console.error("Engine init error:", err);
+          setError("Failed to load your music data. Please restart the app.");
+          setIsLoading(false);
+        });
+    }
+
+    return () => {
+      active = false;
+      clearInterval(statusTimer);
+      mountedRef.current = false;
+      likedSyncVersionRef.current++;
+      // Hand the on-screen cards back so they're the first ones dealt
+      // when the user returns from the playlist screen.
+      engine.requeue(visibleTracksRef.current);
+    };
   }, []);
 
   useEffect(() => {
@@ -139,7 +240,7 @@ export function SwipeScreen({ onOpenPlaylist, onEndSession }: SwipeScreenProps) 
     engine
       .getReactiveTracksAfterLike(5)
       .then((tracks) => {
-        if (syncVersion !== likedSyncVersionRef.current) return;
+        if (!mountedRef.current || syncVersion !== likedSyncVersionRef.current) return;
         setVisibleTracks(tracks);
         setRecommendationStatus(engine.getStatusMessage());
         setSwipeKey((key) => key + 1);
@@ -155,8 +256,10 @@ export function SwipeScreen({ onOpenPlaylist, onEndSession }: SwipeScreenProps) 
   const loadMore = useCallback(async () => {
     const engine = engineRef.current;
     if (!engine) return;
+    const version = likedSyncVersionRef.current;
     setRecommendationStatus(engine.getStatusMessage());
     const newTrack = await engine.getNextTrack();
+    if (!mountedRef.current || version !== likedSyncVersionRef.current) return;
     if (newTrack) {
       setVisibleTracks((prev) => [...prev, newTrack]);
     }
@@ -164,13 +267,21 @@ export function SwipeScreen({ onOpenPlaylist, onEndSession }: SwipeScreenProps) 
   }, []);
 
   const handleSwipe = useCallback(
-    async (track: AppTrack, direction: "left" | "right" | "up") => {
+    async (track: AppTrack, direction: "left" | "right" | "up" | "down") => {
       if (direction === "right") {
         addLikedTrack(track);
         engineRef.current?.recordSwipe(track, "right");
       } else if (direction === "up") {
         addSavedForLater(track);
+        if (DEEZER_TEST_MODE) engineRef.current?.restoreSeen?.([track.id]);
         // Don't record as like or dislike — it's neutral for the algorithm
+      } else if (direction === "down") {
+        // Like the song, but NOT this playlist's vibe → Spotify Liked Songs only
+        addSavedToLiked(track);
+        engineRef.current?.recordSwipe(track, "down");
+        if (!DEEZER_TEST_MODE) SpotifyAPI.saveTracks([track.id]).then((ok) => {
+          if (!ok) console.log("Failed to save to Liked Songs:", track.id);
+        });
       } else {
         addSkippedTrack(track);
         engineRef.current?.recordSwipe(track, "left");
@@ -181,7 +292,7 @@ export function SwipeScreen({ onOpenPlaylist, onEndSession }: SwipeScreenProps) 
         strategy: track.strategy || "unknown",
         playlistName,
       });
-      appDataStore.recordSwipe({
+      if (!DEEZER_TEST_MODE) appDataStore.recordSwipe({
         userId: "local",
         sessionId: playlistName,
         trackId: track.id,
@@ -190,19 +301,16 @@ export function SwipeScreen({ onOpenPlaylist, onEndSession }: SwipeScreenProps) 
       }).catch(() => {});
 
       if (direction === "right") {
+        const version = ++likedSyncVersionRef.current;
         setIsLoading(true);
-        setRecommendationStatus("Checking Spotify playlists that contain your liked songs...");
+        setRecommendationStatus("Checking available sources for your updated playlist...");
         const reactiveTracks =
           (await engineRef.current?.getReactiveTracksAfterLike(5)) || [];
+        if (!mountedRef.current || version !== likedSyncVersionRef.current) return;
         setRecommendationStatus(
           engineRef.current?.getStatusMessage() || "Finding your next vibe..."
         );
-        if (reactiveTracks.length > 0) {
-          setVisibleTracks(reactiveTracks);
-        } else {
-          setVisibleTracks((prev) => prev.filter((t) => t.id !== track.id));
-          loadMore();
-        }
+        setVisibleTracks(reactiveTracks);
         setIsLoading(false);
         setSwipeKey((k) => k + 1);
         return;
@@ -212,7 +320,7 @@ export function SwipeScreen({ onOpenPlaylist, onEndSession }: SwipeScreenProps) 
       setSwipeKey((k) => k + 1);
       loadMore();
     },
-    [addLikedTrack, addSkippedTrack, addSavedForLater, loadMore, playlistName]
+    [addLikedTrack, addSkippedTrack, addSavedForLater, addSavedToLiked, loadMore, playlistName]
   );
 
   const handleEndSession = useCallback(async () => {
@@ -232,10 +340,15 @@ export function SwipeScreen({ onOpenPlaylist, onEndSession }: SwipeScreenProps) 
           onPress={() => {
             setError(null);
             setIsLoading(true);
-            const engine = new RecommendationEngine();
+            // Route the retry through the session holder so the persistent
+            // engine and this screen never disagree about which engine is live.
+            resetEngineSession();
+            const sessionKey = `${playlistName}::${sessionStartTime}`;
+            const { engine } = getEngineSession(sessionKey);
             engineRef.current = engine;
             setRecommendationStatus("Restarting recommendation engine...");
             engine.initialize(playlistName, selectedVibes, likedTracks).then(async () => {
+              markEngineInitialized(sessionKey);
               setRecommendationStatus(engine.getStatusMessage());
               const tracks: AppTrack[] = [];
               for (let i = 0; i < 5; i++) {
@@ -305,10 +418,37 @@ export function SwipeScreen({ onOpenPlaylist, onEndSession }: SwipeScreenProps) 
         </View>
       </View>
 
+      {/* Social nav — friends + forced-song inbox */}
+      {DEEZER_TEST_MODE ? (
+        <View style={styles.socialBar}>
+          <Text style={[styles.badgeText, { flex: 1 }]} numberOfLines={3}>
+            {playbackError || `Deezer preview test · ${currentTrack?._debug?.overlapTarget ? `${currentTrack._debug.overlapCount}/${currentTrack._debug.overlapTarget} likes matched` : "Context discovery"}`}
+          </Text>
+          {currentTrack?._debug?.playlistUrl && (
+            <TouchableOpacity style={styles.socialBadge} onPress={() => Linking.openURL(currentTrack._debug!.playlistUrl!)}>
+              <Text style={styles.badgeText}>Source playlist</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+      ) : <View style={styles.socialBar}>
+        <TouchableOpacity style={styles.socialBadge} onPress={onOpenFriends} activeOpacity={0.7}>
+          <Text style={styles.badgeText}>Friends</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.socialBadge} onPress={onOpenInbox} activeOpacity={0.7}>
+          <Text style={styles.badgeText}>Inbox</Text>
+          {unseenCount > 0 && (
+            <View style={styles.unseenBadge}>
+              <Text style={styles.unseenText}>{unseenCount}</Text>
+            </View>
+          )}
+        </TouchableOpacity>
+      </View>}
+
       {/* Swipe hint — show once */}
       {swipeCount === 0 && !isLoading && visibleTracks.length > 0 && (
         <View style={styles.hintBar}>
-          <Text style={styles.hintText}>← skip · swipe up to save · like →</Text>
+          <Text style={styles.hintText}>→ fits the vibe · ← nope · ↑ save for later</Text>
+          <Text style={styles.hintText}>{DEEZER_TEST_MODE ? "↓ love it but wrong vibe · saved on this phone" : "↓ love it but wrong vibe — goes to your Liked Songs"}</Text>
         </View>
       )}
 
@@ -324,6 +464,21 @@ export function SwipeScreen({ onOpenPlaylist, onEndSession }: SwipeScreenProps) 
           <View style={styles.loadingContainer}>
             <Text style={styles.loadingText}>No playlist matches yet</Text>
             <Text style={styles.loadingSubtext}>{recommendationStatus}</Text>
+            {DEEZER_TEST_MODE && (
+              <TouchableOpacity style={styles.retryButton} onPress={async () => {
+                const engine = engineRef.current;
+                const version = likedSyncVersionRef.current;
+                setIsLoading(true);
+                await engine?.retry?.();
+                const tracks = await engine?.getReactiveTracksAfterLike(5) || [];
+                if (!mountedRef.current || version !== likedSyncVersionRef.current) return;
+                setVisibleTracks(tracks);
+                setRecommendationStatus(engine?.getStatusMessage() || "No matches.");
+                setIsLoading(false);
+              }}>
+                <Text style={styles.retryText}>Retry discovery</Text>
+              </TouchableOpacity>
+            )}
           </View>
         ) : (
           <>
@@ -355,8 +510,20 @@ export function SwipeScreen({ onOpenPlaylist, onEndSession }: SwipeScreenProps) 
           onSkip={() => handleSwipe(currentTrack, "left")}
           onLike={() => handleSwipe(currentTrack, "right")}
           onSave={() => handleSwipe(currentTrack, "up")}
+          onSaveToLiked={() => handleSwipe(currentTrack, "down")}
           disabled={visibleTracks.length === 0}
         />
+      )}
+
+      {/* Force the current card on a friend */}
+      {!DEEZER_TEST_MODE && !isLoading && currentTrack && (
+        <TouchableOpacity
+          onPress={() => setSendSheetTrack(currentTrack)}
+          style={styles.sendPill}
+          activeOpacity={0.7}
+        >
+          <Text style={styles.sendPillText}>Make a friend listen 🎧</Text>
+        </TouchableOpacity>
       )}
 
       {/* End session */}
@@ -365,6 +532,8 @@ export function SwipeScreen({ onOpenPlaylist, onEndSession }: SwipeScreenProps) 
           <Text style={styles.endSessionText}>End Session</Text>
         </TouchableOpacity>
       )}
+
+      <SendSongSheet track={sendSheetTrack} onClose={() => setSendSheetTrack(null)} />
     </View>
   );
 }
@@ -474,6 +643,40 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: "800",
   },
+  socialBar: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: 20,
+    paddingBottom: 4,
+    zIndex: 20,
+  },
+  socialBadge: {
+    backgroundColor: "rgba(255,255,255,0.06)",
+    borderRadius: 20,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)",
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  unseenBadge: {
+    backgroundColor: "#6366f1",
+    borderRadius: 8,
+    minWidth: 18,
+    height: 18,
+    paddingHorizontal: 4,
+    justifyContent: "center",
+    alignItems: "center",
+    marginLeft: 6,
+  },
+  unseenText: {
+    color: "#fff",
+    fontSize: 10,
+    fontWeight: "800",
+  },
   hintBar: {
     alignItems: "center",
     paddingVertical: 4,
@@ -527,6 +730,21 @@ const styles = StyleSheet.create({
   retryText: {
     color: "#fff",
     fontSize: 14,
+    fontWeight: "600",
+  },
+  sendPill: {
+    alignSelf: "center",
+    backgroundColor: "rgba(255,255,255,0.05)",
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: "rgba(129, 140, 248, 0.3)",
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    marginBottom: 10,
+  },
+  sendPillText: {
+    color: "#a5b4fc",
+    fontSize: 12,
     fontWeight: "600",
   },
   endSession: {

@@ -12,7 +12,7 @@ export async function GET() {
   const { data, error } = await supabase
     .from("recommendations")
     .select(
-      "id, track, note, status, created_at, listened_at, to:to_id(id,username,display_name,avatar_url)"
+      "id, track, note, status, created_at, listened_at, reaction, reacted_at, to:to_id(id,username,display_name,avatar_url)"
     )
     .eq("from_id", me.id)
     .order("created_at", { ascending: false })

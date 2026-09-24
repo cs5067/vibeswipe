@@ -67,8 +67,18 @@ export async function search(
 }
 
 export async function searchPlaylists(query: string, limit = 5): Promise<SpotifyPlaylist[]> {
+  // Metadata search alone cannot support discovery from strangers' playlist contents.
+  if (process.env.NEXT_PUBLIC_SPOTIFY_QUOTA_MODE !== "extended") return [];
   const result = await search(query, ["playlist"], Math.min(limit, 10), 0);
   return (result.playlists?.items || []).filter((playlist): playlist is SpotifyPlaylist => Boolean(playlist?.id));
+}
+
+export async function getMyPlaylists(
+  limit = 50,
+  offset = 0
+): Promise<PaginatedResponse<SpotifyPlaylist>> {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  return apiFetch(`/api/spotify/my-playlists?${params}`);
 }
 
 export async function getPlaylistTracks(

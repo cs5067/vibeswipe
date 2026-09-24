@@ -1,0 +1,10 @@
+{
+  "reviewed": "2026-09-23",
+  "baseline": "local VibeSwipe source",
+  "files": {
+    "src/lib/engine/scoring.ts": "acd26659ccdc4a1315ff765b16a85107da03b773438d053c64f035d96071ac91",
+    "src/lib/engine/genre-graph.ts": "e08bd68d56be9483718a69bf08b7a29652127a19ecdb49253c8018ca8d390381",
+    "src/lib/engine/vibe-interpreter.ts": "e08ba31b11fbc52e0bfc67b978ed09a74e4f90e1c79aea4869ae89be776fc164",
+    "supabase/migrations/0001_corpus_schema.sql": "3988d957effc6f21e6da0157d0167cc9c50edec03e81326860f325e51bda46e4"
+  }
+}

@@ -42,16 +42,14 @@ const VIBE_OPTIONS = [
 ];
 
 const VIBE_SUGGESTIONS = [
-  "Late Night Drives",
-  "Morning Energy",
-  "Chill Vibes Only",
-  "Workout Mode",
-  "Study Session",
-  "Party Starter",
-  "Sad Boi Hours",
-  "Feel Good Mix",
-  "Underground Finds",
-  "Main Character Energy",
+  "late night drive",
+  "gym rage",
+  "heartbreak hours",
+  "main character",
+  "sunday reset",
+  "villain era",
+  "pregame heat",
+  "3am thoughts",
 ];
 
 export function SessionSetupScreen({ onStart, onLogout }: SessionSetupScreenProps) {
@@ -211,7 +209,7 @@ export function SessionSetupScreen({ onStart, onLogout }: SessionSetupScreenProp
           <Text style={styles.backText}>← Back</Text>
         </TouchableOpacity>
 
-        <Text style={styles.title}>Name your playlist</Text>
+        <Text style={styles.title}>Name the vibe</Text>
 
         {selectedVibes.length > 0 && (
           <View style={styles.selectedVibesRow}>
@@ -229,8 +227,8 @@ export function SessionSetupScreen({ onStart, onLogout }: SessionSetupScreenProp
         )}
 
         <Text style={styles.subtitle}>
-          Give it a name — anything goes.{"\n"}
-          The name helps find the right music.
+          Think moment, not genre.{"\n"}
+          The name steers which songs show up.
         </Text>
 
         <View style={styles.inputContainer}>
@@ -240,7 +238,7 @@ export function SessionSetupScreen({ onStart, onLogout }: SessionSetupScreenProp
               setCustomName(text);
               setPlaylistName(text);
             }}
-            placeholder="My awesome playlist..."
+            placeholder="gas station at 2am..."
             placeholderTextColor="rgba(255,255,255,0.2)"
             style={styles.input}
             selectionColor="#a78bfa"
@@ -248,7 +246,7 @@ export function SessionSetupScreen({ onStart, onLogout }: SessionSetupScreenProp
           />
         </View>
 
-        <Text style={styles.orText}>or pick a vibe:</Text>
+        <Text style={styles.orText}>or steal one:</Text>
         <View style={styles.suggestions}>
           {VIBE_SUGGESTIONS.map((name) => (
             <TouchableOpacity

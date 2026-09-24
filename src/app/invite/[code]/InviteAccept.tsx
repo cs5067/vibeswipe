@@ -16,7 +16,11 @@ export function InviteAccept({
   const [status, setStatus] = useState<"idle" | "sending" | "done">("idle");
 
   if (alreadyMe) {
-    return <p className="text-white/40 text-sm">This is your own invite link 🙂</p>;
+    return (
+      <p className="text-white/40 text-sm">
+        This is your own invite link — send it to a friend instead.
+      </p>
+    );
   }
 
   const accept = async () => {
@@ -27,20 +31,24 @@ export function InviteAccept({
       body: JSON.stringify({ toId: inviterId }),
     });
     setStatus("done");
-    setTimeout(() => router.push("/friends"), 900);
+    setTimeout(() => router.push("/friends"), 1400);
   };
 
   if (status === "done") {
-    return <p className="text-green-400 font-semibold">You&apos;re connected with {inviterName}! 🎉</p>;
+    return (
+      <p className="text-green-400 font-semibold">
+        You&apos;re a duo. Go force a song on {inviterName} 🎧
+      </p>
+    );
   }
 
   return (
     <button
       onClick={accept}
       disabled={status === "sending"}
-      className="px-8 py-4 rounded-full bg-gradient-to-r from-indigo-500 to-pink-500 text-white font-bold text-lg disabled:opacity-50"
+      className="px-8 py-4 rounded-full bg-gradient-to-r from-indigo-500 to-pink-500 text-white font-bold text-lg shadow-lg shadow-purple-500/25 disabled:opacity-50"
     >
-      {status === "sending" ? "Connecting..." : `Add ${inviterName}`}
+      {status === "sending" ? "Linking you up…" : `Team up with ${inviterName}`}
     </button>
   );
 }

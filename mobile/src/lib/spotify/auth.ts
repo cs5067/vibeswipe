@@ -28,7 +28,12 @@ const TOKEN_KEY = "spotify_tokens";
 // Must match (1) the Mac's current LAN IP, (2) the port Metro runs on
 // (start with `npx expo start --port 8082`), and (3) a redirect URI
 // registered verbatim in the Spotify developer dashboard.
-const EXPO_GO_REDIRECT_URI = "exp://192.168.100.95:8082/--/callback";
+// Set EXPO_PUBLIC_REDIRECT_URI in .env (or app.json "extra") to your machine's
+// LAN address while developing with Expo Go, e.g.
+//   exp://192.168.1.20:8082/--/callback
+// It must match a redirect URI registered verbatim in the Spotify dashboard.
+const EXPO_GO_REDIRECT_URI =
+  process.env.EXPO_PUBLIC_REDIRECT_URI || "exp://localhost:8082/--/callback";
 
 interface TokenData {
   accessToken: string;

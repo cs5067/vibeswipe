@@ -19,6 +19,11 @@ interface SendSheetProps {
   onClose: () => void;
 }
 
+interface ArenaVibe {
+  slug: string;
+  name: string;
+}
+
 const friendLabel = (f: Friend) => f.displayName || f.username || "Friend";
 
 export function SendSheet({ track, senderName, onClose }: SendSheetProps) {
@@ -28,6 +33,12 @@ export function SendSheet({ track, senderName, onClose }: SendSheetProps) {
   const [status, setStatus] = useState<"idle" | "working" | "sent" | "linkReady" | "error">("idle");
   const [url, setUrl] = useState("");
   const [copied, setCopied] = useState(false);
+  const [vibes, setVibes] = useState<ArenaVibe[] | null>(null);
+  const [showVibes, setShowVibes] = useState(false);
+  const [vibesError, setVibesError] = useState(false);
+  const [droppingSlug, setDroppingSlug] = useState<string | null>(null);
+  const [dropped, setDropped] = useState<{ vibeName: string; already: boolean } | null>(null);
+  const [dropError, setDropError] = useState<string | null>(null);
 
   useEffect(() => {
     fetch("/api/friends")
@@ -114,6 +125,56 @@ export function SendSheet({ track, senderName, onClose }: SendSheetProps) {
     }
   };
 
+  // Public Arena drop: lazy-load the vibe list the first time the picker opens.
+  const toggleVibes = () => {
+    const opening = !showVibes;
+    setShowVibes(opening);
+    if (!opening || vibes !== null) return;
+    setVibesError(false);
+    fetch("/api/arena/vibes")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (d) setVibes((d.vibes || []) as ArenaVibe[]);
+        else setVibesError(true);
+      })
+      .catch(() => setVibesError(true));
+  };
+
+  const dropIntoVibe = async (vibe: ArenaVibe) => {
+    if (droppingSlug) return;
+    setDropError(null);
+    setDroppingSlug(vibe.slug);
+    try {
+      const res = await fetch("/api/arena/drop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          vibeSlug: vibe.slug,
+          track: {
+            id: track.id,
+            name: track.name,
+            artistNames: track.artistNames,
+            albumImage: track.albumImageLarge || track.albumImageUrl,
+            previewUrl: track.previewUrl,
+            spotifyUrl: track.spotifyUrl,
+          },
+          note: note.trim() || undefined,
+        }),
+      });
+      if (res.status === 401) {
+        setDropError("You need to be logged in to drop into a vibe.");
+        return;
+      }
+      if (!res.ok) throw new Error();
+      const data = await res.json();
+      setDropped({ vibeName: vibe.name, already: !!data.already });
+    } catch {
+      setDropError("Couldn't drop it. Try again.");
+    } finally {
+      setDroppingSlug(null);
+    }
+  };
+
   return (
     <AnimatePresence>
       <motion.div
@@ -147,7 +208,26 @@ export function SendSheet({ track, senderName, onClose }: SendSheetProps) {
             </div>
           </div>
 
-          {status === "sent" ? (
+          {dropped ? (
+            <>
+              <p className="text-white/90 font-bold text-lg mb-3">
+                {dropped.already
+                  ? "already in that vibe 🎧"
+                  : `dropped into ${dropped.vibeName} 🔥`}
+              </p>
+              <p className="text-white/50 text-sm mb-4">
+                {dropped.already
+                  ? "Someone beat you to it — go vote it up in the arena instead."
+                  : "It's live in the arena. Watch strangers judge it."}
+              </p>
+              <button
+                onClick={onClose}
+                className="w-full py-3 rounded-full bg-white/10 text-white text-sm font-medium hover:bg-white/20"
+              >
+                Done
+              </button>
+            </>
+          ) : status === "sent" ? (
             <>
               <p className="text-green-400 font-bold text-lg mb-3">Sent 😈</p>
               <p className="text-white/50 text-sm mb-4">
@@ -231,6 +311,50 @@ export function SendSheet({ track, senderName, onClose }: SendSheetProps) {
               >
                 {friends.length > 0 ? "or get a share link (for non-users)" : "Get a share link"}
               </button>
+
+              {/* drop into a public Arena vibe */}
+              <button
+                onClick={toggleVibes}
+                disabled={status === "working" || droppingSlug !== null}
+                className="w-full mt-2 py-2.5 rounded-full bg-white/5 text-white/70 text-xs font-medium hover:bg-white/10"
+              >
+                or drop it into a public vibe
+              </button>
+
+              {showVibes && (
+                <div className="mt-2">
+                  {vibesError ? (
+                    <p className="text-white/30 text-xs text-center py-1">
+                      Couldn&apos;t load the vibes. Try again later.
+                    </p>
+                  ) : vibes === null ? (
+                    <p className="text-white/30 text-xs text-center py-1">loading vibes...</p>
+                  ) : vibes.length === 0 ? (
+                    <p className="text-white/30 text-xs text-center py-1">No vibes open yet.</p>
+                  ) : (
+                    <div className="flex flex-wrap justify-center gap-1.5">
+                      {vibes.map((v) => (
+                        <button
+                          key={v.slug}
+                          onClick={() => void dropIntoVibe(v)}
+                          disabled={droppingSlug !== null}
+                          className={`px-3 py-1.5 rounded-full text-xs transition-colors ${
+                            droppingSlug === v.slug
+                              ? "bg-indigo-500/30 text-white ring-1 ring-indigo-400/50"
+                              : "bg-white/5 text-white/70 hover:bg-white/10 disabled:opacity-40"
+                          }`}
+                        >
+                          {v.name}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {dropError && (
+                <p className="text-red-400 text-xs mt-2 text-center">{dropError}</p>
+              )}
 
               {status === "error" && (
                 <p className="text-red-400 text-xs mt-2 text-center">Something went wrong. Try again.</p>

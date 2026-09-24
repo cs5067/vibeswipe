@@ -10,6 +10,7 @@ import type {
 } from "./types";
 
 const BASE_URL = "https://api.spotify.com/v1";
+const EXTENDED_QUOTA = process.env.SPOTIFY_QUOTA_MODE === "extended";
 
 export class SpotifyApiError extends Error {
   constructor(
@@ -25,9 +26,14 @@ export class SpotifyApiError extends Error {
 export class SpotifyClient {
   constructor(private accessToken: string) {}
 
+  supportsPublicPlaylistDiscovery(): boolean {
+    return EXTENDED_QUOTA;
+  }
+
   private async fetch<T>(path: string, options?: RequestInit): Promise<T> {
     const response = await fetch(`${BASE_URL}${path}`, {
       ...options,
+      signal: AbortSignal.timeout(10_000),
       headers: {
         Authorization: `Bearer ${this.accessToken}`,
         "Content-Type": "application/json",
@@ -44,8 +50,8 @@ export class SpotifyClient {
       );
     }
 
-    if (response.status === 204) return {} as T;
-    return response.json();
+    const text = response.status === 204 ? "" : await response.text();
+    return text ? JSON.parse(text) : ({} as T);
   }
 
   async getMe(): Promise<SpotifyUser> {
@@ -90,6 +96,16 @@ export class SpotifyClient {
   }
 
   async getTracks(ids: string[]): Promise<{ tracks: SpotifyTrack[] }> {
+    if (!EXTENDED_QUOTA) {
+      const tracks: SpotifyTrack[] = [];
+      for (const id of [...new Set(ids)].slice(0, 50)) {
+        try { tracks.push(await this.getTrack(id)); }
+        catch (error) {
+          if (!(error instanceof SpotifyApiError) || error.status !== 404) throw error;
+        }
+      }
+      return { tracks };
+    }
     return this.fetch<{ tracks: SpotifyTrack[] }>(
       `/tracks?ids=${ids.slice(0, 50).join(",")}`
     );
@@ -122,10 +138,17 @@ export class SpotifyClient {
     const params = new URLSearchParams({
       q: query,
       type: types.join(","),
-      limit: String(limit),
-      offset: String(offset),
+      limit: String(Math.max(1, Math.min(limit, 10))),
+      offset: String(Math.max(0, offset)),
     });
     return this.fetch<SearchResponse>(`/search?${params}`);
+  }
+
+  async getMyPlaylists(
+    limit = 50,
+    offset = 0
+  ): Promise<PaginatedResponse<SpotifyPlaylist>> {
+    return this.fetch(`/me/playlists?limit=${limit}&offset=${offset}`);
   }
 
   async getPlaylistTracks(
@@ -137,7 +160,11 @@ export class SpotifyClient {
       limit: String(limit),
       offset: String(offset),
     });
-    return this.fetch(`/playlists/${playlistId}/tracks?${params}`);
+    params.set("limit", String(Math.max(1, Math.min(limit, 50))));
+    if (EXTENDED_QUOTA) return this.fetch(`/playlists/${playlistId}/tracks?${params}`);
+    const data = await this.fetch<PaginatedResponse<{ item: SpotifyTrack }>>(`/playlists/${playlistId}/items?${params}`);
+    return { ...data, items: (data.items || []).filter((entry) => entry?.item?.id)
+      .map((entry) => ({ track: entry.item })) };
   }
 
   async createPlaylist(
@@ -145,7 +172,7 @@ export class SpotifyClient {
     name: string,
     description = ""
   ): Promise<SpotifyPlaylist> {
-    return this.fetch<SpotifyPlaylist>(`/users/${userId}/playlists`, {
+    return this.fetch<SpotifyPlaylist>(EXTENDED_QUOTA ? `/users/${userId}/playlists` : "/me/playlists", {
       method: "POST",
       body: JSON.stringify({ name, description, public: false }),
     });
@@ -154,7 +181,7 @@ export class SpotifyClient {
   async addTracksToPlaylist(playlistId: string, uris: string[]): Promise<void> {
     // Spotify allows max 100 tracks per request
     for (let i = 0; i < uris.length; i += 100) {
-      await this.fetch(`/playlists/${playlistId}/tracks`, {
+      await this.fetch(`/playlists/${playlistId}/${EXTENDED_QUOTA ? "tracks" : "items"}`, {
         method: "POST",
         body: JSON.stringify({ uris: uris.slice(i, i + 100) }),
       });

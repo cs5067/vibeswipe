@@ -52,16 +52,16 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
 
         <Text style={styles.title}>vibeswipe</Text>
         <Text style={styles.subtitle}>
-          Swipe right on music you love.{"\n"}
-          Build playlists that match your vibe.
+          Force your friends to listen{"\n"}
+          to your music taste — and get{"\n"}a 🎧 receipt when they actually do.
         </Text>
 
         {/* Feature cards */}
         <View style={styles.featureRow}>
           {[
-            { emoji: "👆", label: "Swipe to\ndiscover" },
-            { emoji: "🎯", label: "AI-powered\nvibes" },
-            { emoji: "📋", label: "Export\nplaylists" },
+            { emoji: "👆", label: "Swipe songs\ninto a vibe" },
+            { emoji: "👀", label: "Send them.\nNo escape." },
+            { emoji: "🔥", label: "Collect the\nreactions" },
           ].map((f) => (
             <View key={f.label} style={styles.featureCard}>
               <Text style={styles.featureEmoji}>{f.emoji}</Text>

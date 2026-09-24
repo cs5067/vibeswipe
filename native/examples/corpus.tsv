@@ -1,0 +1,4 @@
+# Synthetic examples only. playlist_id<TAB>declared_size<TAB>comma-separated track IDs
+quiet-evening	4	seed-a,seed-b,candidate-x,candidate-y
+weekend	9	seed-a,candidate-z,candidate-x
+already-heard	2	seed-b,seen-track

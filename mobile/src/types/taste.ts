@@ -25,7 +25,7 @@ export interface Branch {
 
 export interface SwipeSignal {
   trackId: string;
-  direction: "left" | "right";
+  direction: "left" | "right" | "down";
   timeToDecideMs: number;  // how long they looked before swiping
   branchId: string;
   timestamp: number;
