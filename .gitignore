@@ -54,3 +54,8 @@ council-transcript-*.md
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Local archive, native build output and linked dependencies
+_to_delete/
+native/build/
+/mobile/node_modules

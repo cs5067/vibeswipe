@@ -72,4 +72,5 @@ export interface RecentlyPlayedResponse {
 
 export interface SearchResponse {
   tracks?: PaginatedResponse<SpotifyTrack>;
+  playlists?: PaginatedResponse<SpotifyPlaylist>;
 }

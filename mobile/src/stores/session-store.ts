@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import type { AppTrack, SwipeRecord } from "../types/track";
+import { DEEZER_TEST_MODE } from "../lib/discovery-mode";
 
 // ─── Saved playlist shape (persisted to AsyncStorage) ───
 export interface SavedPlaylist {
@@ -12,6 +13,9 @@ export interface SavedPlaylist {
   createdAt: number;
   updatedAt: number;
   swipeCount: number;
+  skippedTrackIds?: string[];
+  savedTrackIds?: string[];
+  swipeHistory?: SwipeRecord[];
 }
 
 interface SessionState {
@@ -21,6 +25,7 @@ interface SessionState {
   userImage: string | null;
   likedTracks: AppTrack[];
   skippedTrackIds: string[];
+  savedTrackIds: string[]; // sent to Spotify Liked Songs — NOT part of this playlist
   swipeHistory: SwipeRecord[];
   swipeCount: number;
   sessionStartTime: number;
@@ -35,6 +40,7 @@ interface SessionState {
   removeLikedTrack: (trackId: string) => void;
   addSkippedTrack: (track: AppTrack) => void;
   addSavedForLater: (track: AppTrack) => void;
+  addSavedToLiked: (track: AppTrack) => void;
   setPlaylistName: (name: string) => void;
   setSelectedVibes: (vibes: string[]) => void;
   resetSession: () => void;
@@ -50,7 +56,13 @@ const getDefaultPlaylistName = () => {
   return `Vibe Session - ${date}`;
 };
 
-const STORAGE_KEY = "vibeswipe_playlists";
+const STORAGE_KEY = DEEZER_TEST_MODE ? "vibeswipe_deezer_test_playlists" : "vibeswipe_playlists";
+let storageWrites: Promise<void> = Promise.resolve();
+function persistPlaylists(playlists: SavedPlaylist[]): Promise<void> {
+  const snapshot = JSON.stringify(playlists);
+  storageWrites = storageWrites.catch(() => {}).then(() => AsyncStorage.setItem(STORAGE_KEY, snapshot));
+  return storageWrites;
+}
 
 export const useSessionStore = create<SessionState>((set, get) => ({
   isAuthenticated: false,
@@ -59,6 +71,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   userImage: null,
   likedTracks: [],
   skippedTrackIds: [],
+  savedTrackIds: [],
   swipeHistory: [],
   swipeCount: 0,
   sessionStartTime: Date.now(),
@@ -99,6 +112,21 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       ],
     })),
 
+  // Swipe down: saved to Spotify Liked Songs. Deliberately NOT likedTracks —
+  // the song must not join the playlist or steer the co-occurrence liked set.
+  addSavedToLiked: (track) =>
+    set((state) => {
+      if (state.savedTrackIds.includes(track.id)) return {};
+      return {
+        savedTrackIds: [...state.savedTrackIds, track.id],
+        swipeCount: state.swipeCount + 1,
+        swipeHistory: [
+          ...state.swipeHistory,
+          { track, direction: "down", timestamp: Date.now(), strategy: track.strategy || "unknown" },
+        ],
+      };
+    }),
+
   addSavedForLater: (track) =>
     set((state) => {
       // Don't add duplicates
@@ -117,6 +145,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     set({
       likedTracks: [],
       skippedTrackIds: [],
+      savedTrackIds: [],
       swipeHistory: [],
       swipeCount: 0,
       sessionStartTime: Date.now(),
@@ -134,6 +163,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       userImage: null,
       likedTracks: [],
       skippedTrackIds: [],
+      savedTrackIds: [],
       swipeHistory: [],
       swipeCount: 0,
       sessionStartTime: Date.now(),
@@ -145,7 +175,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   saveCurrentPlaylist: async () => {
     const state = get();
-    if (state.likedTracks.length === 0 && state.savedForLater.length === 0) return;
+    if (!state.currentPlaylistId && state.likedTracks.length === 0 && state.savedForLater.length === 0 && (!DEEZER_TEST_MODE || state.swipeCount === 0)) return;
 
     const id = state.currentPlaylistId || `playlist_${Date.now()}`;
     const playlist: SavedPlaylist = {
@@ -159,6 +189,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         : Date.now(),
       updatedAt: Date.now(),
       swipeCount: state.swipeCount,
+      ...(DEEZER_TEST_MODE ? {
+        skippedTrackIds: state.skippedTrackIds, savedTrackIds: state.savedTrackIds,
+        swipeHistory: state.swipeHistory,
+      } : {}),
     };
 
     const existing = state.savedPlaylists.filter((p) => p.id !== id);
@@ -167,7 +201,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     set({ savedPlaylists: updated, currentPlaylistId: id });
 
     try {
-      await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+      await persistPlaylists(updated);
       console.log(`Saved playlist "${playlist.name}" (${playlist.tracks.length} tracks)`);
     } catch (err) {
       console.error("Failed to save playlist:", err);
@@ -199,6 +233,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       swipeCount: playlist.swipeCount,
       currentPlaylistId: id,
       sessionStartTime: Date.now(),
+      skippedTrackIds: playlist.skippedTrackIds || [],
+      savedTrackIds: playlist.savedTrackIds || [],
+      swipeHistory: playlist.swipeHistory || [],
     });
   },
 
@@ -207,9 +244,19 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     const updated = state.savedPlaylists.filter((p) => p.id !== id);
     set({ savedPlaylists: updated });
     try {
-      await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+      await persistPlaylists(updated);
     } catch (err) {
       console.error("Failed to delete playlist:", err);
     }
   },
 }));
+
+// The private test persists each decision, including the final-like removal.
+// Serialize writes so a slow older write cannot replace a newer snapshot.
+if (DEEZER_TEST_MODE) useSessionStore.subscribe((state, previous) => {
+  if (state.sessionStartTime !== previous.sessionStartTime) return;
+  if (state.likedTracks !== previous.likedTracks || state.savedForLater !== previous.savedForLater ||
+      state.swipeCount !== previous.swipeCount || state.playlistName !== previous.playlistName) {
+    void state.saveCurrentPlaylist();
+  }
+});

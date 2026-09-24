@@ -9,12 +9,19 @@ interface Person {
   display_name: string | null;
   avatar_url: string | null;
 }
+/** Search results carry no profile id — people are addressed by username. */
+interface SearchResult {
+  username: string | null;
+  display_name: string | null;
+  avatar_url: string | null;
+}
 interface PendingReq {
   id: string;
   requester: Person;
 }
 
-const label = (p: Person) => p.display_name || p.username || "Someone";
+const label = (p: Person | SearchResult) =>
+  p.display_name || p.username || "Someone";
 
 export default function FriendsPage() {
   const [friends, setFriends] = useState<Person[]>([]);
@@ -27,7 +34,7 @@ export default function FriendsPage() {
   const [usernameError, setUsernameError] = useState("");
 
   const [query, setQuery] = useState("");
-  const [results, setResults] = useState<Person[]>([]);
+  const [results, setResults] = useState<SearchResult[]>([]);
   const [sent, setSent] = useState<Set<string>>(new Set());
 
   const load = useCallback(async () => {
@@ -86,12 +93,12 @@ export default function FriendsPage() {
     return () => clearTimeout(t);
   }, [query]);
 
-  const sendRequest = async (toId: string) => {
-    setSent((s) => new Set(s).add(toId));
+  const sendRequest = async (toUsername: string) => {
+    setSent((s) => new Set(s).add(toUsername));
     await fetch("/api/friends/request", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ toId }),
+      body: JSON.stringify({ toUsername }),
     });
     load();
   };
@@ -211,17 +218,17 @@ export default function FriendsPage() {
         {results.length > 0 && (
           <div className="flex flex-col gap-2 mt-2">
             {results.map((p) => (
-              <div key={p.id} className="glass rounded-xl p-3 flex items-center gap-3">
+              <div key={p.username} className="glass rounded-xl p-3 flex items-center gap-3">
                 <div className="flex-1 min-w-0">
                   <p className="text-white text-sm truncate">{label(p)}</p>
                   {p.username && <p className="text-white/40 text-xs">@{p.username}</p>}
                 </div>
                 <button
-                  onClick={() => sendRequest(p.id)}
-                  disabled={sent.has(p.id)}
+                  onClick={() => sendRequest(p.username ?? "")}
+                  disabled={!p.username || sent.has(p.username)}
                   className="px-3 py-1.5 rounded-full bg-white/10 text-white text-xs font-medium disabled:opacity-40"
                 >
-                  {sent.has(p.id) ? "Sent" : "Add"}
+                  {p.username && sent.has(p.username) ? "Sent" : "Add"}
                 </button>
               </div>
             ))}

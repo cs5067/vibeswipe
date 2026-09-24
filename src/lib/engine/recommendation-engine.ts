@@ -3,6 +3,7 @@ import type { AppTrack } from "../../types/track";
 import type { TasteProfile } from "../../types/taste";
 import { buildTasteProfile, estimateTrackEnergy } from "./taste-profile";
 import { rankCandidates } from "./scoring";
+import { rankWithNative } from "./native-ranking";
 import { generateSeeds, type PlaylistSeeds } from "./playlist-seeds";
 import * as SpotifyAPI from "../spotify/api";
 
@@ -582,6 +583,140 @@ export class RecommendationEngine {
     }
   }
 
+  // ================================================
+  // STRATEGY 8: The user's OWN playlists
+  // If the session is called "Sudani" and the user HAS a playlist whose
+  // name matches, that playlist is the single best source in existence —
+  // hand-curated by the exact person we're recommending to. Reads use the
+  // /me/playlists endpoint (not the rate-limited search surface). One-shot
+  // per session; playlist reads feed the corpus server-side automatically.
+  // ================================================
+  private ownPlaylistsChecked = false;
+
+  private async ownPlaylistMatches(): Promise<AppTrack[]> {
+    if (this.ownPlaylistsChecked) return [];
+    this.ownPlaylistsChecked = true;
+
+    try {
+      const res = await SpotifyAPI.getMyPlaylists(50, 0);
+      const mine = (res.items || []).filter((p) => p && p.id);
+      if (mine.length === 0) return [];
+
+      const words = this.playlistName
+        .toLowerCase()
+        .split(/\s+/)
+        .filter((w) => w.length > 2);
+      const matches = mine
+        .filter((p) => {
+          const n = (p.name || "").toLowerCase();
+          // Skip the playlist this session itself is exporting to.
+          if (n === this.playlistName.toLowerCase()) return false;
+          return words.some((w) => n.includes(w));
+        })
+        .slice(0, 3);
+      if (matches.length === 0) {
+        console.log("Own playlists: no name matches for this vibe");
+        return [];
+      }
+
+      const branchId = `own_${this.refillCount}`;
+      const out: AppTrack[] = [];
+      for (const pl of matches) {
+        try {
+          // Name passed so the server-side corpus ingest can tag it.
+          const data = await SpotifyAPI.getPlaylistTracks(pl.id, 100, 0, pl.name);
+          const tracks = (data.items || [])
+            .map((item: any) => item?.track)
+            .filter((t: any) => t && t.id && !this.profile.seenTrackIds.has(t.id));
+          console.log(`Own playlist "${pl.name}": ${tracks.length} fresh tracks`);
+          for (const t of tracks) {
+            out.push(
+              toAppTrack(t, [], branchId, "own_playlist", "safe", {
+                searchQuery: `From your own "${pl.name}" playlist — you already vouched for this.`,
+                playlistName: pl.name,
+              })
+            );
+          }
+        } catch {
+          /* skip unreadable playlist */
+        }
+      }
+
+      if (out.length > 0) {
+        this.registerBranch(branchId, []);
+        const b = this.profile.branches.get(branchId);
+        if (b) b.confidence = 0.95;
+      }
+      return out;
+    } catch (err) {
+      console.log("Own playlists lookup failed:", err);
+      return [];
+    }
+  }
+
+  // ================================================
+  // STRATEGY 9: Last.fm similar tracks (borrowed scale)
+  // "People who play X also play Y", computed from millions of real
+  // Last.fm listeners. Carries quality while our own corpus densifies.
+  // Names come back from Last.fm; we resolve a handful via Spotify search.
+  // ================================================
+  private async lastfmSimilar(seed: AppTrack): Promise<AppTrack[]> {
+    const artist = seed.artistNames[0];
+    if (!artist) return [];
+
+    const cacheKey = `lastfm:${seed.id}`;
+    if (this.searchedQueries.has(cacheKey)) return [];
+    this.searchedQueries.add(cacheKey);
+
+    const branchId = `lastfm_${seed.id.slice(0, 8)}`;
+    try {
+      const params = new URLSearchParams({ artist, title: seed.name, limit: "12" });
+      const res = await fetch(`/api/lastfm/similar?${params}`);
+      if (!res.ok) return [];
+      const data = await res.json();
+      const similar: Array<{ name: string; artist: string; match: number }> =
+        Array.isArray(data?.similar) ? data.similar : [];
+      if (similar.length === 0) return [];
+
+      const out: AppTrack[] = [];
+      // Resolve only a handful per refill to keep Spotify calls bounded.
+      for (const s of similar.slice(0, 6)) {
+        try {
+          const result = await SpotifyAPI.search(`${s.name} ${s.artist}`, ["track"], 3, 0);
+          const hit = (result.tracks?.items || []).find(
+            (t: any) =>
+              t &&
+              t.id &&
+              !this.profile.seenTrackIds.has(t.id) &&
+              (t.artists || []).some((a: any) =>
+                String(a?.name || "").toLowerCase().includes(s.artist.toLowerCase().slice(0, 12))
+              )
+          );
+          if (hit) {
+            out.push(
+              toAppTrack(hit, seed.genres, branchId, "lastfm_similar", "edge", {
+                searchQuery: `People who play "${seed.name}" also play this (Last.fm, ${Math.round(s.match * 100)}% match).`,
+              })
+            );
+          }
+        } catch {
+          /* skip this similar track */
+        }
+      }
+
+      console.log(`Last.fm similar to "${seed.name}": ${out.length} resolved`);
+      if (out.length > 0) {
+        this.registerBranch(branchId, seed.genres);
+        const branch = this.profile.branches.get(branchId);
+        if (branch) branch.confidence = 0.8;
+      }
+      return out;
+    } catch (err) {
+      console.log("Last.fm similar failed:", err);
+      return [];
+    }
+  }
+
   private registerBranch(branchId: string, genres: string[]): void {
     this.profile.branches.set(branchId, {
       id: branchId, sourceArtistId: "", sourceGenres: genres,
@@ -615,6 +750,10 @@ export class RecommendationEngine {
         // ─── COLD START ───
         // Use playlist seeds for discovery + playlist name search + some library
 
+        // 0. If the user already OWNS a playlist matching this vibe name,
+        // its songs are the perfect cold-start deck (one-shot, self-gating).
+        promises.push(this.ownPlaylistMatches());
+
         // 1. Search for playlists matching the playlist name (collaborative filtering!)
         promises.push(this.playlistNameSearch());
 
@@ -646,8 +785,16 @@ export class RecommendationEngine {
         // ≥3 likes (it self-gates), alongside whichever mix is rolled below.
         promises.push(this.corpusCooccurrence());
 
+        // The user's own matching playlists — best source there is when the
+        // vibe name lines up (one-shot per session, self-gating).
+        promises.push(this.ownPlaylistMatches());
+
         const recentLiked = this.likedTracks.slice(-8);
         const pick = recentLiked[Math.floor(Math.random() * recentLiked.length)];
+
+        // Borrowed collaborative filtering from Last.fm's millions of
+        // listeners — strongest while our own corpus is still young.
+        promises.push(this.lastfmSimilar(pick));
 
         const r = Math.random();
 
@@ -698,6 +845,7 @@ export class RecommendationEngine {
       } else {
         // ─── NO LIKES YET (past cold start) ───
         // Keep searching seed artists + playlists
+        promises.push(this.ownPlaylistMatches());
         for (let i = 0; i < 3; i++) {
           const artist = this.getNextSeedArtist();
           if (artist) {
@@ -746,10 +894,19 @@ export class RecommendationEngine {
         return;
       }
 
-      // Score, rank, light shuffle for variety
-      const ranked = rankCandidates(
-        allCandidates, this.profile, this.profile.branches, this.likedTracks
+      // Batch scoring runs in C++; an unavailable backend uses the local scorer.
+      const scoringSwipes = this.totalSwipes;
+      let ranked = await rankWithNative(
+        allCandidates, this.profile, this.profile.branches, this.likedTracks, "/api/reco/rank"
       );
+
+      // A swipe during the round-trip changes the taste inputs. Re-score locally
+      // against the current profile rather than enqueueing obsolete scores.
+      if (scoringSwipes !== this.totalSwipes) {
+        ranked = rankCandidates(allCandidates, this.profile, this.profile.branches, this.likedTracks);
+      }
+      ranked = ranked.filter(({ track }) => !this.profile.seenTrackIds.has(track.id)
+        && !this.queue.some(queued => queued.id === track.id));
 
       // Attach debug score info to each track
       const totalCandidates = ranked.length;

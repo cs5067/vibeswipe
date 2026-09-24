@@ -9,10 +9,12 @@ import {
   View,
   Alert,
   ActivityIndicator,
+  Share,
 } from "react-native";
 import { useSessionStore } from "../stores/session-store";
 import { getMe, createPlaylist, addTracksToPlaylist } from "../lib/spotify/client";
 import type { AppTrack } from "../types/track";
+import { DEEZER_TEST_MODE } from "../lib/discovery-mode";
 
 interface PlaylistScreenProps {
   onBack: () => void;
@@ -34,6 +36,14 @@ export function PlaylistScreen({ onBack }: PlaylistScreenProps) {
     setIsExporting(true);
 
     try {
+      await useSessionStore.getState().saveCurrentPlaylist();
+      if (DEEZER_TEST_MODE) {
+        await Share.share({ message: [playlistName, ...likedTracks.map((t) => `${t.name} - ${t.artistNames.join(", ")}\n${t.providerUrl || ""}`)].join("\n\n") });
+        return;
+      }
+      if (likedTracks.some((t) => !t.uri.startsWith("spotify:track:"))) {
+        throw new Error("This playlist contains tracks that have not been matched to Spotify.");
+      }
       const user = await getMe();
       const playlist = await createPlaylist(
         user.id,
@@ -156,7 +166,7 @@ export function PlaylistScreen({ onBack }: PlaylistScreenProps) {
           {isExporting ? (
             <ActivityIndicator size="small" color="#000" />
           ) : (
-            <Text style={styles.exportText}>{exported ? "Saved ✓" : "Export"}</Text>
+            <Text style={styles.exportText}>{DEEZER_TEST_MODE ? "Share" : exported ? "Saved ✓" : "Export"}</Text>
           )}
         </TouchableOpacity>
       </View>

@@ -1,6 +1,9 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  outputFileTracingIncludes: {
+    "/api/reco/rank": ["./native/build/vibeswipe-rank"],
+  },
   turbopack: {
     root: process.cwd(),
   },

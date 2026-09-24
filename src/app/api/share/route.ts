@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createShare } from "@/lib/share/server";
+import { rateLimit, requestIp } from "@/lib/rate-limit";
 import type { SharedTrack } from "@/types/share";
 
 /**
@@ -9,6 +10,17 @@ import type { SharedTrack } from "@/types/share";
  * Returns:   { code, url }
  */
 export async function POST(request: NextRequest) {
+  const limited = rateLimit(`share:${requestIp(request)}`, {
+    limit: 30,
+    windowMs: 60 * 60 * 1000,
+  });
+  if (!limited.ok) {
+    return NextResponse.json(
+      { error: "Too many requests", retryAfterSec: limited.retryAfterSec },
+      { status: 429, headers: { "Retry-After": String(limited.retryAfterSec) } }
+    );
+  }
+
   let body: { track?: Partial<SharedTrack>; senderName?: unknown; note?: unknown };
   try {
     body = await request.json();

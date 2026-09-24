@@ -1,0 +1,19 @@
+{
+  "captured_on": "2026-09-23",
+  "source_project": "cs5067/vibeswipe local working tree (web engine)",
+  "note": "Exact offline snapshots of pure source modules. Original type-only imports are stripped by Node; no provider or database calls. Snapshot hashes pin the baseline, not a repository commit.",
+  "files": {
+    "scoring.ts": {
+      "source_path": "src/lib/engine/scoring.ts",
+      "sha256": "acd26659ccdc4a1315ff765b16a85107da03b773438d053c64f035d96071ac91"
+    },
+    "genre-graph.ts": {
+      "source_path": "src/lib/engine/genre-graph.ts",
+      "sha256": "e08bd68d56be9483718a69bf08b7a29652127a19ecdb49253c8018ca8d390381"
+    },
+    "vibe-interpreter.ts": {
+      "source_path": "src/lib/engine/vibe-interpreter.ts",
+      "sha256": "e08ba31b11fbc52e0bfc67b978ed09a74e4f90e1c79aea4869ae89be776fc164"
+    }
+  }
+}

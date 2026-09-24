@@ -20,9 +20,12 @@ interface RecItem {
   status: "unseen" | "seen" | "listened";
   created_at: string;
   listened_at?: string | null;
+  reaction?: string | null;
   from?: Person | null;
   to?: Person | null;
 }
+
+const REACTIONS = ["🔥", "❤️", "😂", "😭", "🤢"];
 
 const personName = (p?: Person | null) => p?.display_name || p?.username || "A friend";
 
@@ -41,6 +44,7 @@ export default function InboxPage() {
   const [loading, setLoading] = useState(true);
   const [playingId, setPlayingId] = useState<string | null>(null);
   const [noPreview, setNoPreview] = useState<Set<string>>(new Set());
+  const [copied, setCopied] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -127,8 +131,51 @@ export default function InboxPage() {
     }
   };
 
+  const react = (item: RecItem, emoji: string) => {
+    if (item.reaction === emoji) return; // already picked — nothing to do
+    setItems((prev) =>
+      prev.map((r) => (r.id === item.id ? { ...r, reaction: emoji } : r))
+    );
+    fetch("/api/inbox", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: item.id, reaction: emoji }),
+    }).catch(() => {});
+  };
+
   const list = tab === "inbox" ? items : sentItems ?? [];
   const sentLoading = tab === "sent" && sentItems === null;
+
+  // taste record — derived from the already-fetched sent items, no extra calls
+  const sent = sentItems ?? [];
+  const sentCount = sent.length;
+  const listenedCount = sent.filter((r) => r.status === "listened").length;
+  const listenRate = sentCount > 0 ? Math.round((listenedCount / sentCount) * 100) : 0;
+  const fireCount = sent.filter((r) => r.reaction === "🔥").length;
+  const pukeCount = sent.filter((r) => r.reaction === "🤢").length;
+  const verdict =
+    sentCount < 3
+      ? "build your record — force more songs"
+      : listenRate >= 70
+        ? "your taste has receipts 🎧"
+        : pukeCount > fireCount
+          ? "rough crowd. keep swinging."
+          : "respectable. push harder.";
+
+  const shareRecord = async () => {
+    const text = `My taste record on vibeswipe: ${sentCount} sent, ${listenRate}% actually listened, ${fireCount} 🔥. Your taste. Their ears. No escape.`;
+    try {
+      if (navigator.share) {
+        await navigator.share({ text });
+      } else {
+        await navigator.clipboard.writeText(text);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      }
+    } catch {
+      // user dismissed the share sheet — nothing to do
+    }
+  };
 
   return (
     <main className="relative min-h-screen flex flex-col px-5 py-6 bg-[#0a0a0f]">
@@ -137,9 +184,14 @@ export default function InboxPage() {
           ← Swipe
         </Link>
         <h1 className="text-lg font-bold text-gradient">Recommendations</h1>
-        <Link href="/friends" className="text-sm text-white/40 hover:text-white/70">
-          Friends
-        </Link>
+        <div className="flex items-center gap-4">
+          <Link href="/arena" className="text-sm text-white/40 hover:text-white/70">
+            Arena
+          </Link>
+          <Link href="/friends" className="text-sm text-white/40 hover:text-white/70">
+            Friends
+          </Link>
+        </div>
       </header>
 
       {/* Tabs */}
@@ -191,77 +243,132 @@ export default function InboxPage() {
           )}
         </div>
       ) : (
-        <div className="flex flex-col gap-3">
-          {list.map((item) => (
-            <div
-              key={item.id}
-              className={`glass rounded-2xl p-4 flex gap-4 items-center ${
-                tab === "inbox" && item.status === "unseen"
-                  ? "ring-1 ring-indigo-400/40"
-                  : ""
-              }`}
-            >
-              {item.track.albumImage ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={item.track.albumImage}
-                  alt=""
-                  className="w-16 h-16 rounded-xl object-cover shrink-0"
-                />
-              ) : (
-                <div className="w-16 h-16 rounded-xl bg-white/5 shrink-0" />
-              )}
-
-              <div className="min-w-0 flex-1">
-                {tab === "inbox" ? (
-                  <p className="text-indigo-300 text-xs font-semibold">
-                    {personName(item.from)} recommends
-                  </p>
+        <>
+          {tab === "sent" && sentCount > 0 && (
+            <div className="mb-5">
+              <div className="grid grid-cols-3 gap-2 mb-2">
+                <div className="glass rounded-2xl px-3 py-3 text-center">
+                  <p className="text-xl font-bold text-gradient">{sentCount}</p>
+                  <p className="text-xs text-white/40">Sent</p>
+                </div>
+                <div className="glass rounded-2xl px-3 py-3 text-center">
+                  <p className="text-xl font-bold text-gradient">{listenRate}%</p>
+                  <p className="text-xs text-white/40">Listened</p>
+                </div>
+                <div className="glass rounded-2xl px-3 py-3 text-center">
+                  <p className="text-xl font-bold text-gradient">{fireCount}</p>
+                  <p className="text-xs text-white/40">🔥 earned</p>
+                </div>
+              </div>
+              <div className="flex items-center justify-between gap-3 px-1">
+                <p className="text-xs text-white/40 italic">{verdict}</p>
+                <button
+                  onClick={() => void shareRecord()}
+                  className="text-xs text-white/40 hover:text-white/70 shrink-0 transition-colors"
+                >
+                  {copied ? "copied 🎧" : "share your record"}
+                </button>
+              </div>
+            </div>
+          )}
+          <div className="flex flex-col gap-3">
+            {list.map((item) => (
+              <div
+                key={item.id}
+                className={`glass rounded-2xl p-4 flex gap-4 items-center ${
+                  tab === "inbox" && item.status === "unseen"
+                    ? "ring-1 ring-indigo-400/40"
+                    : ""
+                }`}
+              >
+                {item.track.albumImage ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={item.track.albumImage}
+                    alt=""
+                    className="w-16 h-16 rounded-xl object-cover shrink-0"
+                  />
                 ) : (
-                  <p className="text-pink-300 text-xs font-semibold flex items-center gap-2">
-                    to {personName(item.to)} · {statusChip(item)}
-                  </p>
+                  <div className="w-16 h-16 rounded-xl bg-white/5 shrink-0" />
                 )}
-                <p className="text-white font-semibold truncate">{item.track.name}</p>
-                <p className="text-white/50 text-sm truncate">
-                  {item.track.artistNames.join(", ")}
-                </p>
-                {item.note?.trim() && (
-                  <p className="text-white/70 text-xs italic mt-1 truncate">
-                    “{item.note.trim()}”
+
+                <div className="min-w-0 flex-1">
+                  {tab === "inbox" ? (
+                    <p className="text-indigo-300 text-xs font-semibold">
+                      {personName(item.from)} recommends
+                    </p>
+                  ) : (
+                    <p className="text-pink-300 text-xs font-semibold flex items-center gap-2">
+                      to {personName(item.to)} · {statusChip(item)}
+                      {item.reaction && (
+                        <span
+                          className="px-1.5 py-0.5 rounded-full bg-white/10 text-xs"
+                          title="Their reaction"
+                        >
+                          {item.reaction}
+                        </span>
+                      )}
+                    </p>
+                  )}
+                  <p className="text-white font-semibold truncate">{item.track.name}</p>
+                  <p className="text-white/50 text-sm truncate">
+                    {item.track.artistNames.join(", ")}
                   </p>
+                  {item.note?.trim() && (
+                    <p className="text-white/70 text-xs italic mt-1 truncate">
+                      “{item.note.trim()}”
+                    </p>
+                  )}
+                  {tab === "inbox" && (
+                    <div className="flex gap-1 mt-2">
+                      {REACTIONS.map((emoji) => (
+                        <button
+                          key={emoji}
+                          onClick={() => react(item, emoji)}
+                          className={`w-7 h-7 rounded-full text-sm flex items-center justify-center transition-colors ${
+                            item.reaction === emoji
+                              ? "bg-white/15 ring-1 ring-white/30"
+                              : "hover:bg-white/10"
+                          }`}
+                          aria-label={`React with ${emoji}`}
+                        >
+                          {emoji}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {noPreview.has(item.id) ? (
+                  <a
+                    href={item.track.spotifyUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-[#1DB954] text-xs font-medium shrink-0"
+                  >
+                    Spotify
+                  </a>
+                ) : (
+                  <button
+                    onClick={() => void play(item)}
+                    className="w-11 h-11 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center shrink-0"
+                    aria-label="Play"
+                  >
+                    {playingId === item.id ? (
+                      <svg className="w-5 h-5 text-white" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" />
+                      </svg>
+                    ) : (
+                      <svg className="w-5 h-5 text-white ml-0.5" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M8 5v14l11-7z" />
+                      </svg>
+                    )}
+                  </button>
                 )}
               </div>
-
-              {noPreview.has(item.id) ? (
-                <a
-                  href={item.track.spotifyUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-[#1DB954] text-xs font-medium shrink-0"
-                >
-                  Spotify
-                </a>
-              ) : (
-                <button
-                  onClick={() => void play(item)}
-                  className="w-11 h-11 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center shrink-0"
-                  aria-label="Play"
-                >
-                  {playingId === item.id ? (
-                    <svg className="w-5 h-5 text-white" fill="currentColor" viewBox="0 0 24 24">
-                      <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" />
-                    </svg>
-                  ) : (
-                    <svg className="w-5 h-5 text-white ml-0.5" fill="currentColor" viewBox="0 0 24 24">
-                      <path d="M8 5v14l11-7z" />
-                    </svg>
-                  )}
-                </button>
-              )}
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        </>
       )}
     </main>
   );

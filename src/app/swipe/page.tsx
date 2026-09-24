@@ -164,6 +164,13 @@ export default function SwipePage() {
 
         <div className="flex items-center gap-3">
           <Link
+            href="/arena"
+            className="glass rounded-full px-3 py-1.5 text-xs text-white/50 hover:text-white/70 transition-colors"
+          >
+            Arena
+          </Link>
+
+          <Link
             href="/inbox"
             className="relative glass rounded-full px-3 py-1.5 text-xs text-white/50 hover:text-white/70 transition-colors"
           >

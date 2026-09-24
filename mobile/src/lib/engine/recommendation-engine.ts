@@ -2,9 +2,11 @@ import type { AppTrack } from "../../types/track";
 import type { TasteProfile, Branch } from "../../types/taste";
 import { buildTasteProfile, estimateTrackEnergy } from "./taste-profile";
 import { rankCandidates } from "./scoring";
+import { rankWithNative } from "./native-ranking";
 import { generateSeeds, type PlaylistSeeds } from "./playlist-seeds";
 import * as SpotifyAPI from "../spotify/client";
 import * as ServerAPI from "../server-api";
+import { loadSeen, rememberSeen } from "./playlist-memory";
 
 function toAppTrack(
   track: any,
@@ -53,35 +55,24 @@ function toAppTrack(
 }
 
 /**
- * Recommendation Engine v6
+ * Mobile recommendation session.
  *
- * Key improvements over v5:
- * - Smart playlist-name-to-seeds mapping (with optional AI)
- * - Extracts anchor artists from top tracks when getTopArtists returns empty
- * - Fixed: search always uses offset=0 (dev mode rejects offsets)
- * - Fixed: null filtering in playlist co-occurrence
- * - Fixed: popularity filter removed from vibe search
- * - New: "playlist name search" strategy for cold start
- * - Better query diversity (unique query per search, never repeats)
+ * Retrieve candidates from corpus co-occurrence, Last.fm, authorized playlists
+ * and track/artist searches. Arbitrary public-playlist strategies require
+ * approved extended access; a mode flag cannot grant that permission.
  *
- * Working endpoints:
- * ✅ Search (tracks, playlists)
- * ✅ Artist Albums → Album Tracks
- * ✅ User Top Tracks / Top Artists / Recently Played / Saved Tracks
- *
- * Discovery strategies:
- * 1. SEARCH BY ARTIST NAME — finds similar music via Spotify's search ranking
- * 2. PLAYLIST CO-OCCURRENCE — find playlists containing liked artist → get other songs
- * 3. PLAYLIST NAME SEARCH — find playlists matching the user's chosen name → mine tracks
- * 4. ALBUM DEEP DIVE — crawl albums from liked artists for deep cuts
- * 5. VIBE/QUERY SEARCH — diverse search queries from playlist seeds
- * 6. USER LIBRARY — saved tracks, top tracks from different time ranges
+ * Likes are the session's anchors. Revisions prevent an older retrieval from
+ * repopulating the queue after those anchors change. Ranking retains corpus
+ * evidence before applying taste heuristics; full-set-first SQL is still TODO.
+ * Debug metadata names the actual source, including generic fallback searches.
  */
 export class RecommendationEngine {
   private profile!: TasteProfile;
   private queue: AppTrack[] = [];
-  private isRefilling = false;
+  private refillPromise: Promise<void> | null = null;
+  private likedRevision = 0;
   private initialized = false;
+  private initializationPromise: Promise<void> | null = null;
   private playlistName = "";
   private likedTracks: AppTrack[] = [];
   private baseGenreWeights = new Map<string, number>();
@@ -127,7 +118,18 @@ export class RecommendationEngine {
     return terms.some((term) => haystack.includes(term.toLowerCase()));
   }
 
-  async initialize(
+  initialize(
+    playlistName?: string,
+    selectedVibes?: string[],
+    initialLikedTracks: AppTrack[] = []
+  ): Promise<void> {
+    if (this.initializationPromise) return this.initializationPromise;
+    this.initializationPromise = this.initializeSession(playlistName, selectedVibes, initialLikedTracks)
+      .finally(() => { this.initializationPromise = null; });
+    return this.initializationPromise;
+  }
+
+  private async initializeSession(
     playlistName?: string,
     selectedVibes?: string[],
     initialLikedTracks: AppTrack[] = []
@@ -137,7 +139,7 @@ export class RecommendationEngine {
 
     console.log("Engine init: step 1 — fetching user data");
 
-    // Fetch user data in parallel — each call guarded independently
+    // Fetch sequentially; each failure is isolated and respects the shared cooldown.
     let shortTracks: any[] = [];
     let shortArtists: any[] = [];
     let mediumTracks: any[] = [];
@@ -245,10 +247,24 @@ export class RecommendationEngine {
 
     this.initialized = true;
 
+    // Restore this playlist's swipe memory from previous app sessions so
+    // "continue" actually continues — decided cards never re-deal.
+    try {
+      const seen = await loadSeen(this.playlistName);
+      for (const id of seen) this.profile.seenTrackIds.add(id);
+      if (seen.length > 0) {
+        console.log(`Engine init: restored ${seen.length} previously swiped tracks`);
+      }
+    } catch {
+      /* memory is a nicety — never block init on it */
+    }
+
     if (initialLikedTracks.length > 0) {
       this.likedTracks = initialLikedTracks.filter((track, index, tracks) =>
         tracks.findIndex((candidate) => candidate.id === track.id) === index
       );
+      // Liked songs are decided — never re-deal them either.
+      for (const t of this.likedTracks) this.profile.seenTrackIds.add(t.id);
       this.rebuildLikedSessionProfile();
       console.log(`Engine init: hydrated ${this.likedTracks.length} saved liked tracks`);
     }
@@ -258,6 +274,17 @@ export class RecommendationEngine {
     console.log(`  ${this.seeds.seedArtists.length} seed artists, ${this.seeds.searchQueries.length} search queries`);
 
     await this.refillPool();
+  }
+
+  /** Put unswiped cards back at the FRONT of the queue — used when the
+   *  swipe screen unmounts (e.g. user checks their playlist) so the same
+   *  cards greet them on return. Queue-dealt tracks bypass the seen-filter,
+   *  so requeued cards deal again fine. */
+  requeue(tracks: AppTrack[]): void {
+    if (tracks.length === 0) return;
+    const queuedIds = new Set(this.queue.map((t) => t.id));
+    const fresh = tracks.filter((t) => !queuedIds.has(t.id));
+    this.queue.unshift(...fresh);
   }
 
   isReady(): boolean {
@@ -277,17 +304,21 @@ export class RecommendationEngine {
     if (this.queue.length === 0 && Date.now() < this.playlistSearchCooldownUntil) {
       return null;
     }
+    if (this.queue.length === 0) await this.refillPool();
     const track = this.queue.shift() || null;
     if (track) {
       this.profile.seenTrackIds.add(track.id);
       this.swipeStartTime = Date.now();
     }
-    if (this.queue.length < 8) this.refillPool();
+    if (track && this.queue.length < 8) void this.refillPool();
     return track;
   }
 
-  recordSwipe(track: AppTrack, direction: "left" | "right"): void {
+  recordSwipe(track: AppTrack, direction: "left" | "right" | "down"): void {
     this.totalSwipes++;
+    // Persist the decision so continuing this playlist in a later app
+    // session never re-deals it.
+    rememberSeen(this.playlistName, track.id);
     const timeToDecide = this.swipeStartTime > 0 ? Date.now() - this.swipeStartTime : 3000;
 
     this.profile.swipeSignals.push({
@@ -299,11 +330,12 @@ export class RecommendationEngine {
     });
 
     const strength =
-      direction === "right"
-        ? timeToDecide < 2000 ? 1.5 : timeToDecide < 5000 ? 1.0 : 0.7
-        : timeToDecide < 1500 ? 1.2 : timeToDecide < 5000 ? 0.8 : 0.5;
+      direction === "left"
+        ? timeToDecide < 1500 ? 1.2 : timeToDecide < 5000 ? 0.8 : 0.5
+        : timeToDecide < 2000 ? 1.5 : timeToDecide < 5000 ? 1.0 : 0.7;
 
     if (direction === "right") this.handleLike(track, strength);
+    else if (direction === "down") this.handleSaveToLiked(track, strength);
     else this.handleDislike(track, strength);
   }
 
@@ -311,6 +343,7 @@ export class RecommendationEngine {
     if (this.likedTracks.some((liked) => liked.id === track.id)) return;
 
     this.likedTracks.push(track);
+    this.likedRevision++;
     for (const id of track.artistIds) this.profile.likedArtistIds.add(id);
     for (const genre of track.genres) {
       const g = genre.toLowerCase();
@@ -331,11 +364,24 @@ export class RecommendationEngine {
     });
     if (this.profile.lastLikedTracks.length > 5) this.profile.lastLikedTracks.shift();
 
-    // A like is a strong steering signal. Keep a small, on-intent queue so
-    // the next refill can react to this exact song instead of draining old candidates.
-    this.queue = this.queue
-      .filter((candidate) => this.matchesSpecificIntent(candidate))
-      .slice(0, 6);
+    // A like changes the evidence. Rebuild instead of draining old candidates.
+    this.queue = [];
+  }
+
+  /**
+   * Swipe down: "I like this song, but it does NOT fit this playlist's vibe."
+   * The song goes to the user's Spotify Liked Songs, NOT the playlist. So:
+   * mild positive artist/genre signal (the user does like the music), but no
+   * likedTracks entry and no branch confidence boost (the vibe did not match).
+   */
+  private handleSaveToLiked(track: AppTrack, strength: number): void {
+    this.profile.seenTrackIds.add(track.id);
+    for (const id of track.artistIds) this.profile.likedArtistIds.add(id);
+    for (const genre of track.genres) {
+      const g = genre.toLowerCase();
+      const cur = this.profile.genreWeights.get(g) || 0;
+      this.profile.genreWeights.set(g, Math.min(cur + 0.04 * strength, 1.5));
+    }
   }
 
   /**
@@ -359,6 +405,7 @@ export class RecommendationEngine {
     if (!changed) return { changed: false, removed: false };
 
     this.likedTracks = uniqueLiked;
+    this.likedRevision++;
     this.rebuildLikedSessionProfile();
     this.checkedOverlapPlaylists.clear();
 
@@ -445,6 +492,7 @@ export class RecommendationEngine {
   // Find playlists containing an artist/song → get other songs
   // ================================================
   private async playlistCoOccurrence(searchTerm: string, genres: string[]): Promise<AppTrack[]> {
+    if (!SpotifyAPI.supportsPublicPlaylistDiscovery()) return [];
     const branchId = `playlist_${searchTerm.slice(0, 10)}`;
     try {
       const playlists = await SpotifyAPI.searchPlaylists(searchTerm, 5);
@@ -495,11 +543,21 @@ export class RecommendationEngine {
   // 4. Recommend the other tracks from those verified playlists
   // ================================================
   private async playlistOverlapFromLikedSet(seedTrack?: AppTrack): Promise<AppTrack[]> {
+    if (!SpotifyAPI.supportsPublicPlaylistDiscovery()) return [];
     const likedSet = this.likedTracks.slice(-8);
     if (seedTrack && !likedSet.some((track) => track.id === seedTrack.id)) {
       likedSet.push(seedTrack);
     }
     if (likedSet.length === 0) return [];
+
+    // RATE DISCIPLINE: this strategy text-searches playlists and reads their
+    // tracklists — the most expensive thing we do against Spotify. Run at
+    // full cadence only early (≤2 likes); after that once every 3rd refill.
+    // Burning 6–9 searches per refill here caused live 503s and starved the
+    // passive corpus ingestion that rides on successful playlist reads.
+    if (this.likedTracks.length > 2 && this.refillCount % 3 !== 0) {
+      return [];
+    }
 
     const primaryTrack = seedTrack || likedSet[likedSet.length - 1];
     const artistName = primaryTrack.artistNames[0] || "";
@@ -527,7 +585,9 @@ export class RecommendationEngine {
     let scannedPlaylists = 0;
     let verifiedPlaylists = 0;
 
-    const maxQueries = likedSet.length <= 2 ? 2 : 3;
+    // One well-aimed query (track+artist — the one most likely to surface
+    // playlists that genuinely contain it) instead of 2-3 broad ones.
+    const maxQueries = 1;
 
     for (const query of queries.slice(0, maxQueries)) {
       try {
@@ -623,11 +683,11 @@ export class RecommendationEngine {
   // Asks OUR Postgres corpus "which songs sit next to my liked songs on
   // real playlists" — the direct lookup Spotify's API cannot do. The
   // corpus is fed by every playlist any session scans (see ingestPlaylist
-  // calls), so it widens with use. Kicks in from 2 likes.
+  // calls), so it widens with use. Also works with one remaining like.
   // ================================================
   private async corpusCooccurrence(): Promise<AppTrack[]> {
     const likedIds = this.likedTracks.map((t) => t.id);
-    if (likedIds.length < 2) return [];
+    if (likedIds.length === 0) return [];
 
     const branchId = `corpus_${this.refillCount}`;
     try {
@@ -653,15 +713,87 @@ export class RecommendationEngine {
 
       return fresh.map((t: any) => {
         const c = byId.get(t.id);
-        return toAppTrack(t, [], branchId, "corpus_cooccur", "edge", {
+        const track = toAppTrack(t, [], branchId, "corpus_cooccur", "edge", {
           searchQuery: "our playlist index",
           matchedBecause: c
-            ? `Sits alongside your liked songs on ${c.sharedPlaylists} real playlist${c.sharedPlaylists === 1 ? "" : "s"}.`
+            ? `Sits alongside your liked songs on ${c.sharedPlaylists} real playlist${c.sharedPlaylists === 1 ? "" : "s"}. Corpus score: ${Number(c.score).toFixed(3)}.`
             : undefined,
         });
+        track.corpusScore = c && Number.isFinite(Number(c.score)) ? Number(c.score) : 0;
+        return track;
       });
     } catch (err) {
       console.log("Corpus co-occurrence failed:", err);
+      return [];
+    }
+  }
+
+  // ================================================
+  // STRATEGY 2E: The user's OWN playlists
+  // If the session is called "Sudani" and the user HAS a playlist whose
+  // name matches, that playlist is the single best source in existence —
+  // hand-curated by the exact person we're recommending to. Reads use the
+  // /me/playlists endpoint (not the rate-limited search surface). One-shot
+  // per session; results also feed the corpus.
+  // ================================================
+  private ownPlaylistsChecked = false;
+
+  private async ownPlaylistMatches(): Promise<AppTrack[]> {
+    if (this.ownPlaylistsChecked) return [];
+    this.ownPlaylistsChecked = true;
+
+    try {
+      const res = await SpotifyAPI.getMyPlaylists(50, 0);
+      const mine = (res.items || []).filter((p) => p && p.id);
+      if (mine.length === 0) return [];
+
+      const words = this.playlistName
+        .toLowerCase()
+        .split(/\s+/)
+        .filter((w) => w.length > 2);
+      const matches = mine
+        .filter((p) => {
+          const n = (p.name || "").toLowerCase();
+          return words.some((w) => n.includes(w));
+        })
+        .slice(0, 3);
+      if (matches.length === 0) {
+        console.log("Own playlists: no name matches for this vibe");
+        return [];
+      }
+
+      const branchId = `own_${this.refillCount}`;
+      const out: AppTrack[] = [];
+      for (const pl of matches) {
+        try {
+          const data = await SpotifyAPI.getPlaylistTracks(pl.id, 100, 0);
+          ServerAPI.ingestPlaylist(pl.id, pl.name || null, (data as any).total ?? null, data.items || []);
+          const tracks = (data.items || [])
+            .map((item: any) => item?.track)
+            .filter((t: any) => t && t.id && !this.profile.seenTrackIds.has(t.id));
+          console.log(`Own playlist "${pl.name}": ${tracks.length} fresh tracks`);
+          for (const t of tracks) {
+            out.push(
+              toAppTrack(t, [], branchId, "own_playlist", "safe", {
+                searchQuery: `your playlist: ${pl.name}`,
+                playlistName: pl.name,
+                matchedBecause: `From your own "${pl.name}" playlist — you already vouched for this.`,
+              })
+            );
+          }
+        } catch {
+          /* skip unreadable playlist */
+        }
+      }
+
+      if (out.length > 0) {
+        this.registerBranch(branchId, []);
+        const b = this.profile.branches.get(branchId);
+        if (b) b.confidence = 0.95;
+      }
+      return out;
+    } catch (err) {
+      console.log("Own playlists lookup failed:", err);
       return [];
     }
   }
@@ -730,14 +862,11 @@ export class RecommendationEngine {
 
     const spotifyName = String(spotifyTrack?.name || "").toLowerCase().trim();
     const appName = appTrack.name.toLowerCase().trim();
-    const spotifyArtists = (spotifyTrack?.artists || [])
-      .map((artist: any) => String(artist?.name || "").toLowerCase())
-      .join(" ");
-    const appArtists = appTrack.artistNames.join(" ").toLowerCase();
-
-    return spotifyName === appName && appTrack.artistNames.some((artist) =>
-      spotifyArtists.includes(artist.toLowerCase()) || appArtists.includes(artist.toLowerCase())
-    );
+    const spotifyArtists = new Set((spotifyTrack?.artists || [])
+      .map((artist: any) => String(artist?.name || "").toLowerCase().trim())
+      .filter(Boolean));
+    return spotifyName.length > 0 && spotifyName === appName &&
+      appTrack.artistNames.some((artist) => spotifyArtists.has(artist.toLowerCase().trim()));
   }
 
   // ================================================
@@ -746,6 +875,7 @@ export class RecommendationEngine {
   // This IS collaborative filtering — other users curated these playlists
   // ================================================
   private async playlistNameSearch(): Promise<AppTrack[]> {
+    if (!SpotifyAPI.supportsPublicPlaylistDiscovery()) return [];
     const searches = this.seeds.playlistSearches;
     if (searches.length === 0) return [];
 
@@ -950,12 +1080,29 @@ export class RecommendationEngine {
   // ================================================
   // POOL REFILL — orchestrates all strategies
   // ================================================
-  async refillPool(): Promise<void> {
-    if (this.isRefilling) return;
-    if (this.likedTracks.length > 0 && Date.now() < this.playlistSearchCooldownUntil) {
+  refillPool(): Promise<void> {
+    if (this.refillPromise) return this.refillPromise;
+    this.refillPromise = this.refillCurrentRevision().finally(() => {
+      this.refillPromise = null;
+    });
+    return this.refillPromise;
+  }
+
+  private async refillCurrentRevision(): Promise<void> {
+    let revision: number;
+    do {
+      revision = this.likedRevision;
+      await this.refillOnce(revision);
+    } while (revision !== this.likedRevision);
+  }
+
+  private async refillOnce(revision: number): Promise<void> {
+    const cooldown = SpotifyAPI.getSpotifyCooldownUntil();
+    if (Date.now() < cooldown) {
+      this.playlistSearchCooldownUntil = cooldown;
+      this.statusMessage = `Spotify paused requests until ${new Date(cooldown).toLocaleTimeString()}.`;
       return;
     }
-    this.isRefilling = true;
     this.refillCount++;
 
     try {
@@ -973,11 +1120,17 @@ export class RecommendationEngine {
         console.log(
           `Playlist-first refill: ${recentLiked.length} liked song${recentLiked.length === 1 ? "" : "s"}`
         );
-        this.statusMessage = `Searching Spotify playlists that match your ${recentLiked.length} liked song${recentLiked.length === 1 ? "" : "s"}...`;
+        this.statusMessage = SpotifyAPI.supportsPublicPlaylistDiscovery()
+          ? `Checking playlist overlap for ${recentLiked.length} liked songs...`
+          : "Checking the playlist index, your playlists and similar tracks. Public Spotify playlist access is unavailable in development mode.";
 
-        // The corpus is the primary source once there are >=2 likes —
+        // The corpus is queried from the first like —
         // a direct "playlists containing these songs" lookup, no name
-        // guessing. (Self-gates below 2 likes / when server unreachable.)
+        // guessing. Missing coverage can still leave this source empty.
+        // The user's own matching playlists — best source there is when the
+        // vibe name lines up (one-shot per session, self-gating).
+        promises.push(this.ownPlaylistMatches());
+
         promises.push(this.corpusCooccurrence());
 
         // Borrowed collaborative filtering from Last.fm's millions of
@@ -1030,51 +1183,42 @@ export class RecommendationEngine {
           }
         }
 
-      } else if (this.totalSwipes < 5) {
-        // ─── COLD START ───
-        // Use playlist seeds for discovery + playlist name search + some library
-        const lastLike = this.likedTracks[this.likedTracks.length - 1];
-        if (lastLike) {
-          promises.push(this.playlistOverlapFromLikedSet(lastLike));
-        }
-
-        // 1. Search for playlists matching the playlist name (collaborative filtering!)
-        promises.push(this.playlistNameSearch());
-
-        // 2. Search for 2-3 seed artists from playlist-name mapping
-        for (let i = 0; i < 3; i++) {
-          const artist = this.getNextSeedArtist();
-          if (artist) {
-            promises.push(this.searchArtist(artist, this.seeds.genres));
-          }
-        }
-
-        // 3. Playlist co-occurrence from a seed artist
-        const coArtist = this.getNextSeedArtist();
-        if (coArtist) {
-          promises.push(this.playlistCoOccurrence(coArtist, this.seeds.genres));
-        }
-
-        // 4. One query search from seeds
-        promises.push(this.querySearch());
-
-        // 5. Small amount of library (shuffled)
-        promises.push(this.userLibrary("top"));
-
       } else {
-        // ─── NO LIKES YET (past cold start) ───
-        // Keep searching seed artists + playlists
-        for (let i = 0; i < 3; i++) {
-          const artist = this.getNextSeedArtist();
-          if (artist) {
-            promises.push(this.searchArtist(artist, this.seeds.genres));
+        // ─── NO LIKES YET: deal from the user's OWN library ───
+        // Familiar songs mean instant vibe judgment — you know them, so no
+        // preview needed to decide fit. Zero search calls burned. Discovery
+        // takes over the moment the first like anchors the session.
+        this.statusMessage = "Pick the vibe from songs you know...";
+
+        // If the user already OWNS a playlist matching this vibe name,
+        // its songs are the perfect cold-start deck.
+        promises.push(this.ownPlaylistMatches());
+
+        const lib = await Promise.allSettled([
+          this.userLibrary("saved"),
+          this.userLibrary("top"),
+        ]);
+        const libTracks = lib.flatMap((r) =>
+          r.status === "fulfilled" ? r.value : []
+        );
+        promises.push(Promise.resolve(libTracks));
+
+        // Library exhausted (small library, or a long no-like streak burned
+        // through it) → widen to seed-based discovery so the deck never dies.
+        if (libTracks.length < 8) {
+          for (let i = 0; i < 3; i++) {
+            const artist = this.getNextSeedArtist();
+            if (artist) {
+              promises.push(this.searchArtist(artist, this.seeds.genres));
+            }
           }
+          promises.push(this.playlistNameSearch());
+          promises.push(this.querySearch());
         }
-        promises.push(this.playlistNameSearch());
-        promises.push(this.querySearch());
       }
 
       const results = await Promise.allSettled(promises);
+      if (revision !== this.likedRevision) return;
       const allCandidates: AppTrack[] = [];
       const candidateIds = new Set<string>();
 
@@ -1095,7 +1239,7 @@ export class RecommendationEngine {
       }
 
       console.log(`Refill #${this.refillCount}: ${allCandidates.length} candidates`);
-      this.statusMessage = `Found ${allCandidates.length} playlist candidates.`;
+      this.statusMessage = `Found ${allCandidates.length} candidates from available sources.`;
 
       const intentMatches = allCandidates.filter((track) => this.matchesSpecificIntent(track));
       if (intentMatches.length >= 5) {
@@ -1117,11 +1261,49 @@ export class RecommendationEngine {
         }
 
         if (this.likedTracks.length > 0) {
-          console.log("Playlist-first empty: widening to artist search + library");
+          // Widen with the LIKED ARTISTS' top tracks — stays on-vibe, uses a
+          // cheap non-search endpoint, and unlike searchArtist it isn't
+          // neutered by the searched-artists dedup. (Re-dealing the user's
+          // own library mid-discovery-session was the old, stale behavior.)
+          console.log("Playlist-first empty: widening via liked artists' top tracks");
           const recent = this.likedTracks.slice(-3);
-          const widen = await Promise.allSettled(
-            recent.map((t) => this.searchArtist(t.artistNames[0], t.genres))
-          );
+          // Hydrated/persisted tracks can arrive with missing or mangled
+          // artist ids — requesting /artists/undefined/top-tracks 404s.
+          // Validate hard, and fall back to a name search for the rest.
+          const isArtistId = (id: unknown): id is string =>
+            typeof id === "string" && /^[A-Za-z0-9]{22}$/.test(id);
+          const artistIds = [
+            ...new Set(recent.map((t) => t.artistIds[0]).filter(isArtistId)),
+          ];
+          const nameFallbacks = recent
+            .filter((t) => !isArtistId(t.artistIds[0]) && t.artistNames[0])
+            .map((t) => t.artistNames[0]);
+          const widen = await Promise.allSettled([
+            ...artistIds.map(async (id) => {
+              const tracks = await SpotifyAPI.getArtistTopTracks(id);
+              const branchId = `artist_top_${id.slice(0, 8)}`;
+              this.registerBranch(branchId, []);
+              return tracks
+                .filter((t: any) => t && t.id && !this.profile.seenTrackIds.has(t.id))
+                .map((t: any) =>
+                  toAppTrack(t, [], branchId, "artist_top", "safe", {
+                    searchQuery: "liked artist top tracks",
+                  })
+                );
+            }),
+            ...nameFallbacks.map(async (artistName) => {
+              const res = await SpotifyAPI.search(artistName, ["track"], 10, 0);
+              const branchId = `artist_top_${artistName.slice(0, 8)}`;
+              this.registerBranch(branchId, []);
+              return (res.tracks?.items || [])
+                .filter((t: any) => t && t.id && !this.profile.seenTrackIds.has(t.id))
+                .map((t: any) =>
+                  toAppTrack(t, [], branchId, "artist_top", "safe", {
+                    searchQuery: `more by ${artistName}`,
+                  })
+                );
+            }),
+          ]);
           for (const r of widen) {
             if (r.status === "fulfilled") {
               for (const t of r.value) {
@@ -1145,19 +1327,36 @@ export class RecommendationEngine {
         }
       }
 
+      if (revision !== this.likedRevision) return;
       if (allCandidates.length === 0) {
-        this.isRefilling = false;
+        const deadline = SpotifyAPI.getSpotifyCooldownUntil();
+        this.statusMessage = deadline > Date.now()
+          ? `Spotify paused requests until ${new Date(deadline).toLocaleTimeString()}.`
+          : "No more matches from the available sources. Try again later or adjust the playlist.";
         return;
       }
 
-      // Score, rank, light shuffle for variety
-      const ranked = rankCandidates(
-        allCandidates, this.profile, this.profile.branches, this.likedTracks
+      // Batch scoring runs in C++; an unavailable backend uses the local scorer.
+      const scoringSwipes = this.totalSwipes;
+      let ranked = await rankWithNative(
+        allCandidates, this.profile, this.profile.branches, this.likedTracks, `${ServerAPI.SERVER_BASE_URL}/api/reco/rank`
       );
+      if (revision !== this.likedRevision) return;
+      // A swipe during the round-trip changes the taste inputs. Re-score locally
+      // against the current profile rather than enqueueing obsolete scores.
+      if (scoringSwipes !== this.totalSwipes) {
+        ranked = rankCandidates(allCandidates, this.profile, this.profile.branches, this.likedTracks);
+      }
+      ranked = ranked.filter(({ track }) => !this.profile.seenTrackIds.has(track.id)
+        && !this.queue.some(queued => queued.id === track.id));
 
       ranked.sort((a, b) => {
-        const priority = (track: AppTrack) => track.strategy === "playlist_overlap" ? 1 : 0;
-        return priority(b.track) - priority(a.track) || b.score.total - a.score.total;
+        const priority = (track: AppTrack) => track.strategy === "playlist_overlap" ? 2
+          : track.strategy === "corpus_cooccur" ? 1 : 0;
+        return priority(b.track) - priority(a.track)
+          || (b.track._debug?.overlapCount || 0) - (a.track._debug?.overlapCount || 0)
+          || (b.track.corpusScore || 0) - (a.track.corpusScore || 0)
+          || b.score.total - a.score.total;
       });
 
       // Attach debug score info to each track
@@ -1183,19 +1382,14 @@ export class RecommendationEngine {
       const topN = Math.max(5, Math.ceil(ranked.length * 0.7));
       const topTracks = ranked.slice(0, topN).map((r) => r.track);
 
-      // Light shuffle: swap within window of 3 to avoid robotic ordering
-      for (let i = topTracks.length - 1; i > 0; i--) {
-        const j = i - Math.floor(Math.random() * Math.min(3, i));
-        [topTracks[i], topTracks[j]] = [topTracks[j], topTracks[i]];
-      }
+      // Preserve retrieval evidence ordering; diversity is already part of scoring.
 
       this.queue.push(...topTracks);
-      this.statusMessage = `Ready: ${this.queue.length} playlist-based recommendations queued.`;
+      const sources = [...new Set(topTracks.map((track) => track.strategy || "unknown"))].join(", ");
+      this.statusMessage = `Ready: ${this.queue.length} songs. Sources: ${sources}.`;
       console.log(`Queue: ${this.queue.length} tracks`);
     } catch (err) {
       console.error("Refill error:", err);
-    } finally {
-      this.isRefilling = false;
     }
   }
 
@@ -1205,7 +1399,8 @@ export class RecommendationEngine {
     const tracks: AppTrack[] = [];
     for (let i = 0; i < count; i++) {
       const track = await this.getNextTrack();
-      if (track) tracks.push(track);
+      if (!track) break;
+      tracks.push(track);
     }
     return tracks;
   }

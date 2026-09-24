@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSpotifyClient, spotifyErrorResponse, unauthorized } from "@/lib/utils/api-helpers";
-import { getOrCreateProfile, PROFILE_COOKIE } from "@/lib/profile/server";
+import { getOrCreateProfile, makeProfileCookieValue, PROFILE_COOKIE } from "@/lib/profile/server";
 
 export async function GET() {
   const client = await getSpotifyClient();
@@ -25,7 +25,7 @@ export async function GET() {
 
     const res = NextResponse.json({ ...user, vibeswipeProfile: profile });
     if (profile) {
-      res.cookies.set(PROFILE_COOKIE, profile.id, {
+      res.cookies.set(PROFILE_COOKIE, makeProfileCookieValue(profile.id), {
         httpOnly: true,
         secure: process.env.NODE_ENV === "production",
         sameSite: "lax",

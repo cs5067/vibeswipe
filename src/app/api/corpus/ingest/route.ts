@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { ingestPlaylist } from "@/lib/corpus/ingest";
+import { rateLimit, requestIp } from "@/lib/rate-limit";
 
 /**
  * Corpus ingestion endpoint for the MOBILE app.
@@ -10,10 +11,20 @@ import { ingestPlaylist } from "@/lib/corpus/ingest";
  *
  * POST { playlistId, playlistName?, totalTracks?, items: [{ track: {...} }] }
  *
- * NOTE: dev/LAN usage. Before any public deployment this needs real auth
- * (bearer token -> profile), rate limiting, and abuse controls.
+ * Gated by CORPUS_INGEST_TOKEN (required in production) + per-ip rate limit.
  */
 export async function POST(request: NextRequest) {
+  const limited = rateLimit(`ingest:${requestIp(request)}`, {
+    limit: 60,
+    windowMs: 60 * 60 * 1000,
+  });
+  if (!limited.ok) {
+    return NextResponse.json(
+      { error: "Too many requests", retryAfterSec: limited.retryAfterSec },
+      { status: 429, headers: { "Retry-After": String(limited.retryAfterSec) } }
+    );
+  }
+
   // Optional shared-secret gate. When CORPUS_INGEST_TOKEN is set (production),
   // callers must send a matching x-ingest-token header. Unset in local dev so
   // the phone-over-LAN flow works without ceremony. MUST be set before deploy.

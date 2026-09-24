@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { previewPlayer } from "@/lib/audio/preview-player";
@@ -141,21 +141,96 @@ export function SharedSongView({ share }: { share: SharedSong }) {
         </div>
       </div>
 
-      {/* the loop: send one back */}
-      <div className="mt-8 text-center">
-        <p className="text-white/40 text-sm mb-3">
-          Think your taste is better?
+      {/* the loop: identity → send one back → waitlist */}
+      <div className="mt-8 w-full max-w-[340px] text-center">
+        <p className="text-white/50 text-sm leading-relaxed">
+          this is <span className="text-gradient font-bold">vibeswipe</span> —
+          where friends force songs on each other and get receipts
         </p>
+
         <Link
           href="/"
-          className="inline-block px-7 py-3 rounded-full bg-white/10 hover:bg-white/20 text-white font-semibold text-sm transition-colors no-underline"
+          className="mt-4 inline-block px-7 py-3 rounded-full bg-white/10 hover:bg-white/20 text-white font-semibold text-sm transition-colors no-underline"
         >
           Send one back →
         </Link>
-        <p className="mt-5 text-[11px] text-white/20">
-          made with <span className="text-gradient font-bold">vibeswipe</span>
+
+        <Link
+          href="/arena"
+          className="mt-3 block text-xs text-white/30 hover:text-white/60 transition-colors no-underline"
+        >
+          or go judge strangers&apos; taste in the arena →
+        </Link>
+
+        <WaitlistForm />
+
+        <p className="mt-6 text-[11px] text-white/20">
+          Your taste. Their ears. No escape.
         </p>
       </div>
     </main>
+  );
+}
+
+function WaitlistForm() {
+  const [email, setEmail] = useState("");
+  const [status, setStatus] = useState<"idle" | "sending" | "done" | "error">("idle");
+
+  const submit = async (e: FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const trimmed = email.trim();
+    if (!trimmed || status === "sending") return;
+    setStatus("sending");
+    try {
+      const res = await fetch("/api/waitlist", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: trimmed, source: "share" }),
+      });
+      if (!res.ok) throw new Error("waitlist failed");
+      setStatus("done");
+    } catch {
+      setStatus("error");
+    }
+  };
+
+  if (status === "done") {
+    return (
+      <p className="mt-6 text-sm text-white/70">
+        🎧 You&apos;re on the list — we&apos;ll email you when a spot opens.
+      </p>
+    );
+  }
+
+  return (
+    <div className="mt-6">
+      <p className="text-white/40 text-xs mb-2">
+        Want in? It&apos;s invite-only for now — grab a spot.
+      </p>
+      <form
+        onSubmit={submit}
+        className="flex items-center gap-1.5 glass rounded-full p-1.5 pl-4"
+      >
+        <input
+          type="email"
+          required
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          placeholder="you@email.com"
+          disabled={status === "sending"}
+          className="flex-1 min-w-0 bg-transparent text-sm text-white placeholder:text-white/30 outline-none disabled:opacity-50"
+        />
+        <button
+          type="submit"
+          disabled={status === "sending"}
+          className="shrink-0 px-4 py-2 rounded-full bg-white text-black text-xs font-bold hover:bg-white/90 transition-colors disabled:opacity-50"
+        >
+          {status === "sending" ? "Joining…" : "Join"}
+        </button>
+      </form>
+      {status === "error" && (
+        <p className="mt-2 text-xs text-red-400/80">Something broke — try again?</p>
+      )}
+    </div>
   );
 }

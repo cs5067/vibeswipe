@@ -5,10 +5,11 @@ interface ActionButtonsProps {
   onSkip: () => void;
   onLike: () => void;
   onSave: () => void;
+  onSaveToLiked: () => void;
   disabled?: boolean;
 }
 
-export function ActionButtons({ onSkip, onLike, onSave, disabled }: ActionButtonsProps) {
+export function ActionButtons({ onSkip, onLike, onSave, onSaveToLiked, disabled }: ActionButtonsProps) {
   return (
     <View style={styles.container}>
       <TouchableOpacity
@@ -27,6 +28,17 @@ export function ActionButtons({ onSkip, onLike, onSave, disabled }: ActionButton
         activeOpacity={0.7}
       >
         <Text style={styles.saveIcon}>★</Text>
+      </TouchableOpacity>
+
+      {/* Save to Liked Songs — likes the song without adding it to this playlist */}
+      <TouchableOpacity
+        style={[styles.button, styles.savedButton, disabled && styles.disabled]}
+        onPress={onSaveToLiked}
+        disabled={disabled}
+        activeOpacity={0.7}
+      >
+        <Text style={styles.savedIcon}>♥</Text>
+        <Text style={styles.savedArrow}>↓</Text>
       </TouchableOpacity>
 
       <TouchableOpacity
@@ -68,6 +80,13 @@ const styles = StyleSheet.create({
     height: 50,
     borderRadius: 25,
   },
+  savedButton: {
+    backgroundColor: "rgba(255,255,255,0.05)",
+    borderColor: "rgba(236, 72, 153, 0.3)",
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+  },
   likeButton: {
     backgroundColor: "rgba(255,255,255,0.05)",
     borderColor: "rgba(74, 222, 128, 0.3)",
@@ -80,6 +99,18 @@ const styles = StyleSheet.create({
   saveIcon: {
     fontSize: 22,
     color: "#a78bfa",
+  },
+  savedIcon: {
+    fontSize: 18,
+    color: "#ec4899",
+    lineHeight: 20,
+  },
+  savedArrow: {
+    fontSize: 10,
+    color: "#ec4899",
+    fontWeight: "700",
+    lineHeight: 11,
+    marginTop: -2,
   },
   likeIcon: {
     fontSize: 28,

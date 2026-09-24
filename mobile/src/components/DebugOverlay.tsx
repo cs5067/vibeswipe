@@ -1,5 +1,5 @@
 import React from "react";
-import { ScrollView, StyleSheet, Text, View } from "react-native";
+import { Linking, ScrollView, StyleSheet, Text, View } from "react-native";
 import type { AppTrack } from "../types/track";
 
 interface DebugOverlayProps {
@@ -7,6 +7,14 @@ interface DebugOverlayProps {
 }
 
 const STRATEGY_LABELS: Record<string, { label: string; color: string; desc: string }> = {
+  deezer_overlap: {
+    label: "DEEZER PLAYLIST OVERLAP", color: "#34d399",
+    desc: "Verified shared track IDs in a real playlist. Best nonempty overlap tier in the scanned pool, not the entire catalog.",
+  },
+  deezer_context: {
+    label: "DEEZER CONTEXT SEARCH", color: "#60a5fa",
+    desc: "Cold start from real playlists matching your session name. No liked-song overlap yet.",
+  },
   artist_search: {
     label: "ARTIST SEARCH",
     color: "#60a5fa",
@@ -116,6 +124,9 @@ export function DebugOverlay({ track }: DebugOverlayProps) {
           <Text style={styles.infoValue}>"{debug.playlistName}"</Text>
         </View>
       )}
+      {debug?.playlistUrl && (
+        <Text style={styles.infoValue} onPress={() => Linking.openURL(debug.playlistUrl!)}>Open source playlist</Text>
+      )}
       {debug?.matchedBecause && (
         <View style={styles.infoRow}>
           <Text style={styles.infoLabel}>Why this appeared:</Text>
@@ -152,7 +163,7 @@ export function DebugOverlay({ track }: DebugOverlayProps) {
       )}
 
       {/* Source type */}
-      <View style={styles.infoRow}>
+      {track.provider !== "deezer" && <View style={styles.infoRow}>
         <Text style={styles.infoLabel}>Zone:</Text>
         <Text style={[
           styles.zoneBadge,
@@ -162,13 +173,13 @@ export function DebugOverlay({ track }: DebugOverlayProps) {
            track.sourceType === "edge" ? "EDGE (neighborhood)" :
            "JUMP (exploration)"}
         </Text>
-      </View>
+      </View>}
 
       {/* Popularity */}
-      <View style={styles.infoRow}>
+      {track.provider !== "deezer" && <View style={styles.infoRow}>
         <Text style={styles.infoLabel}>Popularity:</Text>
         <Text style={styles.infoValue}>{track.popularity}/100</Text>
-      </View>
+      </View>}
 
       {/* Ranking */}
       {debug?.rank && (

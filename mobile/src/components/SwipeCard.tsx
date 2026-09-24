@@ -15,10 +15,11 @@ import { DebugOverlay } from "./DebugOverlay";
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get("window");
 const SWIPE_THRESHOLD = SCREEN_WIDTH * 0.25;
 const SWIPE_UP_THRESHOLD = SCREEN_HEIGHT * 0.12;
+const SWIPE_DOWN_THRESHOLD = SCREEN_HEIGHT * 0.12;
 
 interface SwipeCardProps {
   track: AppTrack;
-  onSwipe: (direction: "left" | "right" | "up") => void;
+  onSwipe: (direction: "left" | "right" | "up" | "down") => void;
   isTop: boolean;
   index: number;
   debugMode?: boolean;
@@ -52,7 +53,7 @@ export function SwipeCard({ track, onSwipe, isTop, index, debugMode }: SwipeCard
         if (Math.abs(gesture.dx) > 10 || Math.abs(gesture.dy) > 10) {
           didMoveRef.current = true;
         }
-        if (gesture.dy < -30 && Math.abs(gesture.dy) > Math.abs(gesture.dx)) {
+        if (Math.abs(gesture.dy) > 30 && Math.abs(gesture.dy) > Math.abs(gesture.dx)) {
           position.setValue({ x: gesture.dx * 0.3, y: gesture.dy });
         } else {
           position.setValue({ x: gesture.dx, y: gesture.dy * 0.3 });
@@ -66,6 +67,14 @@ export function SwipeCard({ track, onSwipe, isTop, index, debugMode }: SwipeCard
             duration: 300,
             useNativeDriver: true,
           }).start(() => onSwipe("up"));
+        }
+        // Swipe DOWN
+        else if (gesture.dy > SWIPE_DOWN_THRESHOLD && gesture.vy > 0.5) {
+          Animated.timing(position, {
+            toValue: { x: 0, y: SCREEN_HEIGHT },
+            duration: 300,
+            useNativeDriver: true,
+          }).start(() => onSwipe("down"));
         }
         // Swipe RIGHT
         else if (gesture.dx > SWIPE_THRESHOLD || gesture.vx > 1.2) {
@@ -125,6 +134,12 @@ export function SwipeCard({ track, onSwipe, isTop, index, debugMode }: SwipeCard
     extrapolate: "clamp",
   });
 
+  const savedOpacity = position.y.interpolate({
+    inputRange: [0, SWIPE_DOWN_THRESHOLD],
+    outputRange: [0, 1],
+    extrapolate: "clamp",
+  });
+
   const stackScale = 1 - index * 0.05;
   const stackTranslateY = index * 12;
 
@@ -176,6 +191,14 @@ export function SwipeCard({ track, onSwipe, isTop, index, debugMode }: SwipeCard
             <Animated.View style={[styles.saveOverlay, { opacity: saveOpacity }]}>
               <Text style={styles.saveText}>SAVE</Text>
               <Text style={styles.saveSubtext}>for later</Text>
+            </Animated.View>
+          )}
+
+          {/* SAVED stamp — swipe down (Liked Songs, not this playlist) */}
+          {isTop && (
+            <Animated.View style={[styles.savedOverlay, { opacity: savedOpacity }]}>
+              <Text style={styles.savedText}>♥ SAVED</Text>
+              <Text style={styles.savedSubtext}>to Liked Songs, not this vibe</Text>
             </Animated.View>
           )}
 
@@ -306,6 +329,32 @@ const styles = StyleSheet.create({
   },
   saveSubtext: {
     color: "#a78bfa",
+    fontSize: 12,
+    fontWeight: "600",
+    marginTop: 2,
+    opacity: 0.8,
+  },
+  savedOverlay: {
+    position: "absolute",
+    top: "20%",
+    alignSelf: "center",
+    paddingHorizontal: 24,
+    paddingVertical: 14,
+    borderRadius: 16,
+    borderWidth: 3,
+    borderColor: "#ec4899",
+    backgroundColor: "rgba(236, 72, 153, 0.3)",
+    zIndex: 20,
+    alignItems: "center",
+  },
+  savedText: {
+    color: "#ec4899",
+    fontSize: 28,
+    fontWeight: "900",
+    letterSpacing: 3,
+  },
+  savedSubtext: {
+    color: "#ec4899",
     fontSize: 12,
     fontWeight: "600",
     marginTop: 2,
