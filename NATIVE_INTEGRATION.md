@@ -54,12 +54,13 @@ npm run dev
 The Node host must permit child processes. Compile the executable for the
 deployment operating system/architecture during its build; do not copy a macOS
 binary to Linux. `next.config.ts` includes the executable in the ranking route's
-file trace. A deployment still needs to verify the traced executable is present,
-executable and reachable from the application working directory. Edge runtimes
+file trace. Local production verification confirms that the traced executable is present,
+executable and reachable from the application working directory. Repeat this
+check on the intended hosting platform. Edge runtimes
 and static-only hosting cannot run this route. A missing executable returns
 503, allowing the client fallback. This work does not deploy the app.
 
-## Verification on 24 September 2026
+## Verification on 25 September 2026
 
 - 63 offline app tests passed, including both client adapters calling the actual
   route handler and compiled C++ process, stable tie ordering, Unicode transport,
@@ -72,13 +73,16 @@ and static-only hosting cannot run this route. A missing executable returns
 - Corpus parity passed 841 SQL-model/CLI cases and 42 invalid-input cases.
 - Scoring parity passed 1,101 tracks, 102 rankings and 31,329 genre pairs against
   pinned original TypeScript, with maximum absolute error 2.22e-16.
-- A fresh Next.js production build was attempted using webpack but could not
-  fetch existing Google Fonts because network access is unavailable. A live
-  local HTTP smoke test could not bind a port under the sandbox. These checks
-  remain pending; direct route-handler-to-native integration is verified.
+- The Next.js production build passed on macOS with `npm run build -- --webpack`.
+  A real loopback HTTP check against `next start` returned `engine: "cpp17"`,
+  expected scores and stable ties. Unicode and empty batches passed; malformed
+  JSON, unsupported content types and oversized bodies returned 400, 415 and
+  413. The native executable is included in the production file trace.
 - AddressSanitizer remains unavailable on this Mac: even a minimal program
   stalls during runtime initialization. CI includes the sanitizer suite for a
-  Linux host, but a remote CI result is not yet available.
+  Linux host. GitHub Actions could not start its jobs because of an account
+  infrastructure restriction; no remote test result is available. The local
+  checks above passed independently.
 
 No authenticated provider session, real phone listening test, production
 deployment, live database change or performance comparison was performed.

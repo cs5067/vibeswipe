@@ -1,10 +1,11 @@
 # VibeSwipe project status
 
-24 September 2026
+25 September 2026
 
 VibeSwipe is a working mobile-first prototype suitable for guided private
 testing. It is not ready for a public launch. The code now includes the C++
-scoring integration, while real-device and production checks remain open.
+scoring integration. Local production-build and HTTP checks pass; real-device
+and hosting-platform checks remain open.
 
 ## Implemented
 
@@ -37,7 +38,7 @@ latest commands and verification boundaries.
    ingestion. Review session expiry/revocation and shared provider quotas.
 4. Verify provider capabilities and permissions for the intended distribution.
    The Deezer experiment and Spotify development access are separate paths.
-5. Complete production build/hosting checks, then test real iOS/Android devices:
+5. Verify the production build on the intended host, then test real iOS/Android devices:
    authenticate, hear previews, swipe rapidly, remove likes, resume and export.
 6. Measure recommendation fit and playback reliability with consenting testers.
    The analytics interface currently uses a no-op implementation, so retention
